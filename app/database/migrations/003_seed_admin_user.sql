@@ -1,3 +1,6 @@
+-- ATENÇÃO: cria a conta admin@empresa.com.br com um hash de senha conhecido/documentado
+-- neste repositório. NUNCA rode esta migration em produção — veja database/seed-dev-users.sql
+-- e a seção "Criando o primeiro administrador em produção" do README.
 USE sis_cred;
 
 INSERT INTO users (name, email, role, password_hash, active)

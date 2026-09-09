@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { Activity, ArrowLeft, ArrowUpRight, Bell, Building2, Camera, Check, ChevronDown, ChevronUp, ClipboardCheck, ClipboardList, Download, FileCheck2, FileText, LogOut, Menu, MessageSquareText, Paperclip, Pencil, Phone, Plus, Search, Send, ShieldCheck, Trash2, UploadCloud, Users, X } from 'lucide-react'
+import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
+import { Activity, ArrowLeft, ArrowUpRight, Bell, Building2, Camera, Check, CheckCircle2, ChevronDown, ChevronUp, ClipboardCheck, ClipboardList, Download, FileCheck2, FileText, Info, LogOut, Menu, MessageSquareText, Paperclip, Pencil, Phone, Plus, Search, Send, ShieldCheck, Trash2, UploadCloud, Users, X, XCircle } from 'lucide-react'
 import './App.css'
 
 type Role = 'vendedor' | 'analista' | 'gestao' | 'admin'
@@ -83,12 +83,59 @@ const loadStoredUser = (): AuthUser | null => {
   try { return JSON.parse(raw) as AuthUser } catch { return null }
 }
 
+type ToastKind = 'success' | 'error' | 'info'
+type Toast = { id: number; kind: ToastKind; message: string }
+const ToastContext = createContext<(kind: ToastKind, message: string) => void>(() => {})
+const useToast = () => useContext(ToastContext)
+const toastIcon: Record<ToastKind, ReactNode> = { success: <CheckCircle2 size={19} />, error: <XCircle size={19} />, info: <Info size={19} /> }
+
+function ToastProvider({ children }: { children: ReactNode }) {
+  const [toasts, setToasts] = useState<Toast[]>([])
+  const nextId = useRef(0)
+  const dismiss = (id: number) => setToasts((list) => list.filter((toast) => toast.id !== id))
+  const pushToast = useCallback((kind: ToastKind, message: string) => {
+    const id = ++nextId.current
+    setToasts((list) => [...list, { id, kind, message }])
+    setTimeout(() => dismiss(id), 5200)
+  }, [])
+  return <ToastContext.Provider value={pushToast}>
+    {children}
+    <div className="toast-stack">
+      {toasts.map((toast) => <div key={toast.id} className={`toast toast-${toast.kind}`} role="status">
+        <div className="toast-icon">{toastIcon[toast.kind]}</div>
+        <p>{toast.message}</p>
+        <button type="button" className="toast-close" onClick={() => dismiss(toast.id)}><X size={14} /></button>
+        <span className="toast-timer"></span>
+      </div>)}
+    </div>
+  </ToastContext.Provider>
+}
+
+function ConfirmationBurst({ ok, title, message, onDone }: { ok: boolean; title: string; message: string; onDone: () => void }) {
+  useEffect(() => {
+    const timeout = setTimeout(onDone, 2200)
+    return () => clearTimeout(timeout)
+  }, [onDone])
+  return <div className="burst-backdrop" onClick={onDone}>
+    <div className={ok ? 'burst-card' : 'burst-card burst-card-fail'} onClick={(event) => event.stopPropagation()}>
+      <div className="burst-icon-ring">
+        {ok
+          ? <svg viewBox="0 0 52 52" className="burst-check"><circle cx="26" cy="26" r="24" className="burst-check-circle" /><path fill="none" d="M14 27l7 7 17-17" className="burst-check-mark" /></svg>
+          : <svg viewBox="0 0 52 52" className="burst-check burst-x"><circle cx="26" cy="26" r="24" className="burst-check-circle" /><path fill="none" d="M17 17l18 18M35 17L17 35" className="burst-check-mark" /></svg>}
+      </div>
+      <h3>{title}</h3>
+      <p>{message}</p>
+    </div>
+  </div>
+}
+
 function App() {
   const [resetToken, setResetToken] = useState<string | null>(() => new URLSearchParams(window.location.search).get('resetToken'))
   const [user, setUser] = useState<AuthUser | null>(loadStoredUser)
   const [requests, setRequests] = useState<Request[]>([])
   const [selected, setSelected] = useState<Request>(emptyRequest)
-  const [notice, setNotice] = useState('')
+  const pushToast = useToast()
+  const [burst, setBurst] = useState<{ ok: boolean; title: string; message: string } | null>(null)
   const [decision, setDecision] = useState<'APROVADA' | 'NEGADA' | null>(null)
   const [showChangePassword, setShowChangePassword] = useState(false)
   const [showEditProfile, setShowEditProfile] = useState(false)
@@ -124,7 +171,7 @@ function App() {
       return next
     })
     setShowEditProfile(false)
-    setNotice('Perfil atualizado com sucesso.')
+    pushToast('success', 'Perfil atualizado com sucesso.')
   }
   useEffect(() => { setView('main') }, [role])
   useEffect(() => {
@@ -143,7 +190,32 @@ function App() {
     setRequests(loaded)
     return loaded
   }
-  useEffect(() => { if (user) loadRequests().catch(() => setNotice('API indisponível. O exemplo do dossiê continua disponível.')) }, [user])
+  useEffect(() => { if (user) loadRequests().catch(() => pushToast('error', 'API indisponível. O exemplo do dossiê continua disponível.')) }, [user])
+  useEffect(() => {
+    if (!user) return
+    let cancelled = false
+    let source: EventSource | null = null
+    let retryTimeout: ReturnType<typeof setTimeout> | null = null
+    const connect = async () => {
+      if (cancelled) return
+      try {
+        const response = await apiFetch('/api/auth/sse-ticket')
+        if (!response.ok) throw new Error('ticket')
+        const { ticket } = await response.json()
+        if (cancelled) return
+        source = new EventSource(`${apiUrl}/api/events?ticket=${encodeURIComponent(ticket)}`)
+        source.addEventListener('requests-changed', () => { loadRequests().catch(() => {}) })
+        source.onerror = () => {
+          source?.close()
+          if (!cancelled) retryTimeout = setTimeout(connect, 3000)
+        }
+      } catch {
+        if (!cancelled) retryTimeout = setTimeout(connect, 5000)
+      }
+    }
+    connect()
+    return () => { cancelled = true; source?.close(); if (retryTimeout) clearTimeout(retryTimeout) }
+  }, [user])
   const items = requests
   const triageItems = items.filter((item) => item.status === 'RECEBIDA' || item.status === 'EM_ANALISE')
   const decidedItems = items.filter((item) => item.status === 'APROVADA' || item.status === 'NEGADA')
@@ -152,9 +224,11 @@ function App() {
   const confirmPraticoUpdate = async (requestId: number) => {
     const response = await apiFetch(`/api/credit-requests/${requestId}/pratico-confirm`, { method: 'PATCH' })
     const data = await response.json().catch(() => null)
-    if (!response.ok) { setNotice(data?.message || 'Não foi possível confirmar a atualização no Prático.'); return }
+    if (!response.ok) { pushToast('error', data?.message || 'Não foi possível confirmar a atualização no Prático.'); return }
     await loadRequests()
-    setNotice(data?.emailSent ? 'Atualização confirmada no Prático. O vendedor foi avisado por e-mail.' : 'Atualização confirmada no Prático.')
+    const message = data?.emailSent ? 'Atualização confirmada no Prático. O vendedor foi avisado por e-mail.' : 'Atualização confirmada no Prático.'
+    pushToast('success', message)
+    setBurst({ ok: true, title: 'Confirmado!', message })
   }
   const notifications: AppNotification[] = role === 'analista'
     ? pendingDecisions.map((item) => ({
@@ -184,9 +258,15 @@ function App() {
       contractUploadFailed = !uploadResponse || !uploadResponse.ok
     }
     await loadRequests()
-    setNotice(contractUploadFailed
-      ? `Ficha ${created.protocol} enviada, mas o contrato social não foi salvo — reenvie o PDF com a analista.`
-      : 'Ficha enviada. A analista já pode iniciar a triagem.')
+    if (contractUploadFailed) {
+      const message = `Ficha ${created.protocol} enviada, mas o contrato social não foi salvo — reenvie o PDF com a analista.`
+      pushToast('error', message)
+      setBurst({ ok: false, title: 'Enviado com pendência', message })
+    } else {
+      const message = `Ficha ${created.protocol} enviada. A analista já pode iniciar a triagem.`
+      pushToast('success', message)
+      setBurst({ ok: true, title: 'Ficha enviada!', message })
+    }
     return null
   }
   const updateStatus = async (nextStatus: Status, approvedLimit?: number, recipientEmail?: string, internalReason?: string, clientMessage?: string) => {
@@ -215,10 +295,15 @@ function App() {
     }
     if (nextStatus === 'APROVADA' || nextStatus === 'NEGADA') {
       const decisionText = nextStatus === 'APROVADA' ? `Crédito aprovado com limite de ${money(approvedLimit ?? null)}.` : 'Crédito negado.'
+      const emailOk = !recipientEmail || emailSent
       const emailText = !recipientEmail ? '' : emailSent ? ' E-mail de confirmação enviado ao vendedor.' : ` Não foi possível enviar o e-mail de confirmação${emailError ? ` (${emailError})` : ''}.`
-      setNotice(`Conferido! ${decisionText}${emailText} A solicitação saiu da fila de decisão.`)
+      const message = `${decisionText}${emailText} A solicitação saiu da fila de decisão.`
+      pushToast(emailOk ? 'success' : 'error', `Conferido! ${message}`)
+      setBurst({ ok: nextStatus === 'APROVADA', title: nextStatus === 'APROVADA' ? 'Crédito aprovado!' : 'Crédito negado', message })
     } else {
-      setNotice('Dossiê enviado para a gestão com sucesso. A solicitação saiu da sua fila de triagem.')
+      const message = 'Dossiê enviado para a gestão com sucesso. A solicitação saiu da sua fila de triagem.'
+      pushToast('success', message)
+      setBurst({ ok: true, title: 'Dossiê enviado!', message })
     }
   }
   const logout = () => { localStorage.removeItem(tokenKey); localStorage.removeItem(userKey); setUser(null) }
@@ -251,9 +336,10 @@ function App() {
           </div>}
         </div>
       </div></header>
-      <div className="content-wrap">{notice && <div className="notice"><Check size={17} /> {notice}<button onClick={() => setNotice('')}><X size={15} /></button></div>}<div key={view} className="page-enter">{view === 'audit' && (role === 'admin' || role === 'gestao') ? <AuditView requests={items} /> : view === 'users' && (role === 'admin' || role === 'gestao') ? <UserManagementView isAdmin={role === 'admin'} /> : view === 'decisions' && role === 'analista' ? <DecisionsView pendingDecisions={pendingDecisions} historyDecisions={historyDecisions} onConfirmPratico={confirmPraticoUpdate} /> : view === 'requests' && role === 'vendedor' ? <SellerRequestsView requests={items} onNew={() => setView('main')} /> : <>{role === 'vendedor' && <SellerForm onSubmit={createRequest} />}{role === 'analista' && <AnalystView requests={triageItems} selected={selected} setSelected={setSelected} onSend={() => updateStatus('AGUARDANDO_GESTAO')} />}{role === 'gestao' && <ManagementView requests={items.filter((item) => item.status === 'AGUARDANDO_GESTAO')} selected={selected} setSelected={setSelected} decision={decision} onDecision={updateStatus} />}{role === 'admin' && <AdminView />}</>}</div></div></main>
-    {showChangePassword && <ChangePasswordModal onClose={() => setShowChangePassword(false)} onSuccess={() => { setShowChangePassword(false); setNotice('Senha atualizada com sucesso.') }} />}
+      <div className="content-wrap"><div key={view} className="page-enter">{view === 'audit' && (role === 'admin' || role === 'gestao') ? <AuditView requests={items} /> : view === 'users' && (role === 'admin' || role === 'gestao') ? <UserManagementView isAdmin={role === 'admin'} /> : view === 'decisions' && role === 'analista' ? <DecisionsView pendingDecisions={pendingDecisions} historyDecisions={historyDecisions} onConfirmPratico={confirmPraticoUpdate} /> : view === 'requests' && role === 'vendedor' ? <SellerRequestsView requests={items} onNew={() => setView('main')} /> : <>{role === 'vendedor' && <SellerForm onSubmit={createRequest} />}{role === 'analista' && <AnalystView requests={triageItems} selected={selected} setSelected={setSelected} onSend={() => updateStatus('AGUARDANDO_GESTAO')} />}{role === 'gestao' && <ManagementView requests={items.filter((item) => item.status === 'AGUARDANDO_GESTAO')} selected={selected} setSelected={setSelected} decision={decision} onDecision={updateStatus} />}{role === 'admin' && <AdminView />}</>}</div></div></main>
+    {showChangePassword && <ChangePasswordModal onClose={() => setShowChangePassword(false)} onSuccess={() => { setShowChangePassword(false); pushToast('success', 'Senha atualizada com sucesso.') }} />}
     {showEditProfile && <EditProfileModal user={user} avatarSrc={avatarSrc} onClose={() => setShowEditProfile(false)} onSaved={saveProfilePatch} />}
+    {burst && <ConfirmationBurst ok={burst.ok} title={burst.title} message={burst.message} onDone={() => setBurst(null)} />}
   </div></>
 }
 
@@ -398,9 +484,9 @@ function UserManagementView({ isAdmin }: { isAdmin: boolean }) {
   const [users, setUsers] = useState<ManagedUser[]>([])
   const [showUserForm, setShowUserForm] = useState(false)
   const [resetTarget, setResetTarget] = useState<ManagedUser | null>(null)
-  const [notice, setNotice] = useState('')
+  const pushToast = useToast()
   const load = async () => { const response = await apiFetch('/api/admin/users'); setUsers(await response.json()) }
-  useEffect(() => { load().catch(() => setNotice('Não foi possível carregar os usuários.')) }, [])
+  useEffect(() => { load().catch(() => pushToast('error', 'Não foi possível carregar os usuários.')) }, [])
   const toggleUser = async (id: number) => { await apiFetch(`/api/admin/users/${id}/toggle`, { method: 'PATCH' }); await load() }
   const resetPassword = async (newPassword: string): Promise<string | null> => {
     if (!resetTarget) return null
@@ -409,7 +495,6 @@ function UserManagementView({ isAdmin }: { isAdmin: boolean }) {
     return null
   }
   return <><PageHeader eyebrow="GESTÃO DE USUÁRIOS" title="Usuários e acessos" subtitle={isAdmin ? 'Crie, suspenda e troque a senha de qualquer acesso do sistema.' : 'Crie, suspenda e troque a senha dos acessos de vendedores, analistas e gestão.'} action={<button className="primary-btn" onClick={() => setShowUserForm(true)}><Plus size={18} /> Criar usuário</button>} />
-    {notice && <div className="notice"><Check size={17} /> {notice}<button onClick={() => setNotice('')}><X size={15} /></button></div>}
     <section className="admin-card"><div className="card-heading"><div><h2>Usuários e permissões</h2><p>{isAdmin ? 'Todos os acessos do sistema.' : 'Acessos de vendedores, analistas e gestão.'}</p></div><span className="tag">{users.length} cadastrados</span></div>
       <div className="user-table"><div className="user-head" style={{ gridTemplateColumns: '1.4fr .8fr .8fr 140px 140px' }}><span>USUÁRIO</span><span>FUNÇÃO</span><span>ACESSO</span><span></span><span></span></div>
         {users.map((managedUser) => <div className="user-row" style={{ gridTemplateColumns: '1.4fr .8fr .8fr 140px 140px' }} key={managedUser.id}>
@@ -421,12 +506,12 @@ function UserManagementView({ isAdmin }: { isAdmin: boolean }) {
         </div>)}
       </div>
     </section>
-    {showUserForm && <CreateUserModal roleOptions={isAdmin ? adminRoleOptions : managementRoleOptions} onClose={() => setShowUserForm(false)} onCreated={() => { setShowUserForm(false); load(); setNotice('Usuário criado com acesso ativo.') }} />}
-    {resetTarget && <ResetUserPasswordModal userName={resetTarget.name} onClose={() => setResetTarget(null)} onSubmit={resetPassword} onDone={() => { setResetTarget(null); setNotice('Senha do usuário atualizada com sucesso.') }} />}
+    {showUserForm && <CreateUserModal roleOptions={isAdmin ? adminRoleOptions : managementRoleOptions} onClose={() => setShowUserForm(false)} onCreated={() => { setShowUserForm(false); load(); pushToast('success', 'Usuário criado com acesso ativo.') }} />}
+    {resetTarget && <ResetUserPasswordModal userName={resetTarget.name} onClose={() => setResetTarget(null)} onSubmit={resetPassword} onDone={() => { setResetTarget(null); pushToast('success', 'Senha do usuário atualizada com sucesso.') }} />}
   </>
 }
 
-function AdminView() { const [overview, setOverview] = useState<{ users: { total: number; active: number }; requests: Array<{ status: string; total: number }>; documents: { total: number }; audit: { total: number } } | null>(null); const [adminNotice, setAdminNotice] = useState(''); useEffect(() => { apiFetch('/api/admin/overview').then((response) => response.json()).then(setOverview).catch(() => setAdminNotice('Não foi possível carregar os dados administrativos.')) }, []); return <><PageHeader eyebrow="ADMINISTRAÇÃO DO SISTEMA" title="Controle e conferência" subtitle="Acompanhe a saúde do processo. Para gerenciar acessos, use Usuários no menu." />{adminNotice && <div className="notice"><Check size={17} /> {adminNotice}</div>}<section className="admin-metrics"><div><Activity size={19} /><span>Usuários ativos</span><strong>{overview?.users.active ?? '...'}</strong></div><div><FileCheck2 size={19} /><span>Solicitações cadastradas</span><strong>{overview?.requests.reduce((sum, item) => sum + Number(item.total), 0) ?? '...'}</strong></div><div><FileText size={19} /><span>Documentos no dossiê</span><strong>{overview?.documents.total ?? '...'}</strong></div><div><ShieldCheck size={19} /><span>Eventos auditados</span><strong>{overview?.audit.total ?? '...'}</strong></div></section><div className="admin-grid"><section className="admin-card checks-card"><div className="card-heading"><div><h2>Conferências rápidas</h2><p>Visão operacional para manutenção.</p></div></div><div className="check-line"><Check size={16} /><div><strong>Banco de dados</strong><small>MariaDB conectado e respondendo</small></div><b>OK</b></div><div className="check-line"><Check size={16} /><div><strong>Fila de crédito</strong><small>Solicitações por status disponíveis</small></div><b>OK</b></div><div className="check-line"><Check size={16} /><div><strong>Auditoria</strong><small>Decisões registradas no histórico</small></div><b>OK</b></div><div className="check-line"><Check size={16} /><div><strong>Documentos</strong><small>Arquivos vinculados aos dossiês</small></div><b>OK</b></div></section></div></> }
+function AdminView() { const [overview, setOverview] = useState<{ users: { total: number; active: number }; requests: Array<{ status: string; total: number }>; documents: { total: number }; audit: { total: number } } | null>(null); const pushToast = useToast(); useEffect(() => { apiFetch('/api/admin/overview').then((response) => response.json()).then(setOverview).catch(() => pushToast('error', 'Não foi possível carregar os dados administrativos.')) }, []); return <><PageHeader eyebrow="ADMINISTRAÇÃO DO SISTEMA" title="Controle e conferência" subtitle="Acompanhe a saúde do processo. Para gerenciar acessos, use Usuários no menu." /><section className="admin-metrics"><div><Activity size={19} /><span>Usuários ativos</span><strong>{overview?.users.active ?? '...'}</strong></div><div><FileCheck2 size={19} /><span>Solicitações cadastradas</span><strong>{overview?.requests.reduce((sum, item) => sum + Number(item.total), 0) ?? '...'}</strong></div><div><FileText size={19} /><span>Documentos no dossiê</span><strong>{overview?.documents.total ?? '...'}</strong></div><div><ShieldCheck size={19} /><span>Eventos auditados</span><strong>{overview?.audit.total ?? '...'}</strong></div></section><div className="admin-grid"><section className="admin-card checks-card"><div className="card-heading"><div><h2>Conferências rápidas</h2><p>Visão operacional para manutenção.</p></div></div><div className="check-line"><Check size={16} /><div><strong>Banco de dados</strong><small>MariaDB conectado e respondendo</small></div><b>OK</b></div><div className="check-line"><Check size={16} /><div><strong>Fila de crédito</strong><small>Solicitações por status disponíveis</small></div><b>OK</b></div><div className="check-line"><Check size={16} /><div><strong>Auditoria</strong><small>Decisões registradas no histórico</small></div><b>OK</b></div><div className="check-line"><Check size={16} /><div><strong>Documentos</strong><small>Arquivos vinculados aos dossiês</small></div><b>OK</b></div></section></div></> }
 
 const statusOrder: Status[] = ['RECEBIDA', 'EM_ANALISE', 'AGUARDANDO_GESTAO', 'APROVADA', 'NEGADA']
 const documentLabel: Record<string, string> = { CONTRATO_SOCIAL: 'Contrato social / Certificado MEI', SERASA: 'Consulta Serasa', DEPS: 'Avaliação DEPS' }
@@ -435,6 +520,7 @@ type AuditEvent = { id: number; requestId: number; eventType: string; eventData:
 const auditEventLabel: Record<string, string> = {
   SOLICITACAO_CRIADA: 'Solicitação criada',
   DOCUMENTO_ENVIADO: 'Documento enviado',
+  DOCUMENTO_REMOVIDO: 'Documento removido',
   STATUS_ATUALIZADO: 'Status atualizado',
   DECISAO_REGISTRADA: 'Decisão registrada',
   PRATICO_CONFIRMADO: 'Confirmado no Prático',
@@ -445,6 +531,7 @@ const auditEventDetail = (event: AuditEvent): string => {
   switch (event.eventType) {
     case 'SOLICITACAO_CRIADA': return 'Ficha cadastral enviada pelo vendedor'
     case 'DOCUMENTO_ENVIADO': return `${documentLabel[data.documentType as string] || data.documentType} anexado`
+    case 'DOCUMENTO_REMOVIDO': return `${documentLabel[data.documentType as string] || data.documentType} removido`
     case 'STATUS_ATUALIZADO': return `Movida para "${statusLabel[data.status as Status] || data.status}"`
     case 'DECISAO_REGISTRADA': return `${data.decision === 'APROVADA' ? 'Aprovada' : 'Negada'}${data.approvedLimit ? ` · ${money(Number(data.approvedLimit))}` : ''}`
     case 'PRATICO_CONFIRMADO': return `Registro confirmado no sistema Prático (${statusLabel[data.status as Status] || data.status})`
@@ -960,21 +1047,42 @@ function AnalystView({ requests, selected, setSelected, onSend }: { requests: Re
     } catch { setUploadError('Não foi possível salvar o PDF. Confira sua conexão e tente novamente.')
     } finally { setUploadingType(null) }
   }
+  const handleRemove = async (documentType: 'SERASA' | 'DEPS', documentId: number) => {
+    if (!selected.id) return
+    setUploadingType(documentType); setUploadError('')
+    try {
+      const response = await apiFetch(`/api/documents/${documentId}`, { method: 'DELETE' })
+      if (!response.ok) { const body = await response.json().catch(() => null); setUploadError(body?.message || 'Não foi possível remover o PDF.'); return }
+      setRequestDocuments(await listDocuments(selected.id))
+    } catch { setUploadError('Não foi possível remover o PDF. Confira sua conexão e tente novamente.')
+    } finally { setUploadingType(null) }
+  }
   const bothUploaded = !!serasaDoc && !!depsDoc
 
   return <><PageHeader eyebrow="ÁREA DA ANALISTA" title="Triagem e montagem do dossiê" subtitle="Receba os cadastros, anexe os relatórios e envie uma análise completa para a gestão." /><div className="analyst-layout"><div className="queue-card"><div className="queue-header"><div><h2>Fila de solicitações</h2><p>{requests.length} cadastro(s) aguardando tratamento</p></div><div className="search"><Search size={16} /><input placeholder="Buscar cliente" /></div></div>{requests.length ? requests.map((item) => <button className={selected.id === item.id ? 'queue-item selected' : 'queue-item'} key={item.id} onClick={() => setSelected(item)}><div className="case-avatar blue">{item.companyName.slice(0, 2)}</div><div><strong>{item.companyName}</strong><small>{item.cnpj}</small></div><span className="queue-time">{statusLabel[item.status]}</span></button>) : <p className="subheading" style={{ padding: '17px' }}>Nenhum cadastro na fila.</p>}</div><div className="dossier-panel">{!selected.id ? <div style={{ padding: '60px 30px', textAlign: 'center' }}><FileCheck2 size={34} style={{ color: '#b8cdfb', marginBottom: 14 }} /><p className="subheading">Selecione um cliente na fila ao lado para ver os dados do cadastro.</p></div> : <><div className="dossier-head"><div><p className="eyebrow">DOSSIÊ {selected.protocol}</p><h2>{selected.companyName}</h2><span>Código Prático: {selected.clientCode} · {selected.cnpj} · solicitado por {selected.sellerName}</span></div><span className="status blue"><i></i>{statusLabel[selected.status]}</span></div><p className="eyebrow">IDENTIFICAÇÃO DA EMPRESA</p><div className="data-grid"><div><span>Código do cadastro (Prático)</span><strong>{selected.clientCode || '—'}</strong></div><div><span>CNPJ</span><strong>{selected.cnpj || '—'}</strong></div><div><span>Razão social</span><strong>{selected.companyName || '—'}</strong></div><div><span>Nome fantasia</span><strong>{selected.tradeName || '—'}</strong></div><div><span>Inscrição estadual</span><strong>{selected.stateRegistration || '—'}</strong></div><div><span>Endereço completo</span><strong>{selected.address || '—'}</strong></div></div>
 <p className="eyebrow" style={{ marginTop: 18 }}>O QUE O VENDEDOR PRECISA</p><p className="modal-copy" style={{ margin: 0 }}>{selected.requestPurpose || '—'}</p>
 <p className="eyebrow" style={{ marginTop: 18 }}>CONTATO DO CLIENTE OU RESPONSÁVEL</p><div className="data-grid"><div><span>Nome do contato</span><strong>{selected.contactName || '—'}</strong></div><div><span>Telefone</span><strong>{selected.phone || '—'}</strong></div><div><span>E-mail de contato</span><strong>{selected.contactEmail || '—'}</strong></div><div><span>E-mail para NFe e avisos de vencimento</span><strong>{selected.invoiceEmail || '—'}</strong></div><div><span>E-mail financeiro</span><strong>{selected.financeEmail || '—'}</strong></div></div>
 <p className="eyebrow" style={{ marginTop: 18 }}>PERGUNTAS OBRIGATÓRIAS</p><div className="data-grid"><div><span>Como o cliente chegou até você?</span><strong>{selected.origin || '—'}</strong></div><div><span>Forma de autorização de compra?</span><strong>{selected.purchaseAuthorization || '—'}</strong></div><div><span>Tipo de entrega?</span><strong>{selected.deliveryType || '—'}</strong></div><div><span>Local da entrega</span><strong>{selected.deliveryLocation || '—'}</strong></div>{selected.deliveryAddress && <div><span>Endereço de entrega</span><strong>{selected.deliveryAddress}</strong></div>}</div>
-{selected.sellerNotes && <><p className="eyebrow" style={{ marginTop: 18 }}>OBSERVAÇÕES DO VENDEDOR</p><p className="modal-copy" style={{ margin: 0 }}>{selected.sellerNotes}</p></>}<div className="report-section"><div className="report-title"><div><FileCheck2 size={18} /><div><h3>Documentos enviados pelo vendedor</h3><p>Contrato social ou certificado de empresário individual.</p></div></div></div><div className="report-files"><ReportFile icon="deps" name="Contrato social / Certificado MEI" detail={contractDoc ? `${contractDoc.originalName} · anexado pelo vendedor` : 'Não anexado pelo vendedor'} complete={!!contractDoc} onClick={() => contractDoc && viewDocument(contractDoc.id)} /></div></div><div className="report-section"><div className="report-title"><div><FileCheck2 size={18} /><div><h3>Relatórios de crédito</h3><p>Clique em cada relatório abaixo para escolher o PDF correspondente.</p></div></div></div>{uploadError && <div className="notice notice-error"><X size={17} /> {uploadError}</div>}<div className="report-files"><ReportFile icon="serasa" name="Consulta Serasa" detail={serasaDoc ? `${serasaDoc.originalName} · PDF original anexado` : uploadingType === 'SERASA' ? 'Enviando...' : 'Clique para escolher o PDF'} complete={!!serasaDoc} onClick={() => (serasaDoc ? viewDocument(serasaDoc.id) : serasaInputRef.current?.click())} /><ReportFile icon="deps" name="Avaliação DEPS" detail={depsDoc ? `${depsDoc.originalName} · PDF original anexado` : uploadingType === 'DEPS' ? 'Enviando...' : 'Clique para escolher o PDF'} complete={!!depsDoc} onClick={() => (depsDoc ? viewDocument(depsDoc.id) : depsInputRef.current?.click())} /></div><input ref={serasaInputRef} type="file" accept="application/pdf" style={{ display: 'none' }} onChange={(event) => handleUpload('SERASA', event.target.files?.[0])} /><input ref={depsInputRef} type="file" accept="application/pdf" style={{ display: 'none' }} onChange={(event) => handleUpload('DEPS', event.target.files?.[0])} /></div>{bothUploaded && <div className="extracted"><div className="extracted-title"><Check size={16} /> Informações extraídas dos relatórios</div><div className="data-grid compact"><div><span>Classificação DEPS</span><strong>3.1 - CCC</strong></div><div><span>Limite sugerido</span><strong>{money(depsSuggestedLimit)}</strong></div><div><span>Risco</span><strong className="danger-text">F) Alto</strong></div><div><span>Protestos</span><strong className="danger-text">7 · {money(44997.75)}</strong></div><div><span>PEFIN</span><strong className="warning-text">2 · {money(8977.16)}</strong></div><div><span>Histórico pontual</span><strong>71,80%</strong></div></div></div>}<button className="primary-btn send-management" disabled={!bothUploaded} onClick={onSend}><Send size={17} /> Enviar dossiê para gestão</button></>}</div></div></>
+{selected.sellerNotes && <><p className="eyebrow" style={{ marginTop: 18 }}>OBSERVAÇÕES DO VENDEDOR</p><p className="modal-copy" style={{ margin: 0 }}>{selected.sellerNotes}</p></>}<div className="report-section"><div className="report-title"><div><FileCheck2 size={18} /><div><h3>Documentos enviados pelo vendedor</h3><p>Contrato social ou certificado de empresário individual.</p></div></div></div><div className="report-files"><ReportFile icon="deps" name="Contrato social / Certificado MEI" detail={contractDoc ? `${contractDoc.originalName} · anexado pelo vendedor` : 'Não anexado pelo vendedor'} complete={!!contractDoc} onClick={() => contractDoc && viewDocument(contractDoc.id)} /></div></div><div className="report-section"><div className="report-title"><div><FileCheck2 size={18} /><div><h3>Relatórios de crédito</h3><p>Clique em cada relatório abaixo para escolher o PDF correspondente.</p></div></div></div>{uploadError && <div className="notice notice-error"><X size={17} /> {uploadError}</div>}<div className="report-files"><ReportFile icon="serasa" name="Consulta Serasa" detail={serasaDoc ? `${serasaDoc.originalName} · PDF original anexado` : uploadingType === 'SERASA' ? 'Enviando...' : 'Clique para escolher o PDF'} complete={!!serasaDoc} onClick={() => (serasaDoc ? viewDocument(serasaDoc.id) : serasaInputRef.current?.click())} onRemove={serasaDoc ? () => handleRemove('SERASA', serasaDoc.id) : undefined} /><ReportFile icon="deps" name="Avaliação DEPS" detail={depsDoc ? `${depsDoc.originalName} · PDF original anexado` : uploadingType === 'DEPS' ? 'Enviando...' : 'Clique para escolher o PDF'} complete={!!depsDoc} onClick={() => (depsDoc ? viewDocument(depsDoc.id) : depsInputRef.current?.click())} onRemove={depsDoc ? () => handleRemove('DEPS', depsDoc.id) : undefined} /></div><input ref={serasaInputRef} type="file" accept="application/pdf" style={{ display: 'none' }} onChange={(event) => handleUpload('SERASA', event.target.files?.[0])} /><input ref={depsInputRef} type="file" accept="application/pdf" style={{ display: 'none' }} onChange={(event) => handleUpload('DEPS', event.target.files?.[0])} /></div>{bothUploaded && <div className="extracted"><div className="extracted-title"><Check size={16} /> Informações extraídas dos relatórios</div><div className="data-grid compact"><div><span>Classificação DEPS</span><strong>3.1 - CCC</strong></div><div><span>Limite sugerido</span><strong>{money(depsSuggestedLimit)}</strong></div><div><span>Risco</span><strong className="danger-text">F) Alto</strong></div><div><span>Protestos</span><strong className="danger-text">7 · {money(44997.75)}</strong></div><div><span>PEFIN</span><strong className="warning-text">2 · {money(8977.16)}</strong></div><div><span>Histórico pontual</span><strong>71,80%</strong></div></div></div>}<button className="primary-btn send-management" disabled={!bothUploaded} onClick={onSend}><Send size={17} /> Enviar dossiê para gestão</button></>}</div></div></>
 }
-function ReportFile({ icon, name, detail, complete, onClick }: { icon: string; name: string; detail: string; complete: boolean; onClick: () => void }) { return <button type="button" className="report-file" onClick={onClick} style={{ width: '100%', textAlign: 'left', font: 'inherit', cursor: 'pointer' }}><div className={'report-icon ' + icon}><FileText size={18} /></div><div><strong>{name}</strong><small>{detail}</small></div>{complete ? <Check className="file-check" size={18} /> : <UploadCloud size={16} />}</button> }
+function ReportFile({ icon, name, detail, complete, onClick, onRemove }: { icon: string; name: string; detail: string; complete: boolean; onClick: () => void; onRemove?: () => void }) {
+  if (!complete) return <button type="button" className="report-file" onClick={onClick} style={{ width: '100%', textAlign: 'left', font: 'inherit', cursor: 'pointer' }}><div className={'report-icon ' + icon}><FileText size={18} /></div><div><strong>{name}</strong><small>{detail}</small></div><UploadCloud size={16} /></button>
+  return <div className="report-file report-file-complete">
+    <div className={'report-icon ' + icon}><FileText size={18} /></div>
+    <div><strong>{name}</strong><small>{detail}</small></div>
+    <div className="report-file-actions">
+      <button type="button" className="report-file-action" title="Visualizar PDF" onClick={onClick}><FileCheck2 size={15} /></button>
+      {onRemove && <button type="button" className="report-file-action danger" title="Remover PDF" onClick={onRemove}><Trash2 size={15} /></button>}
+    </div>
+  </div>
+}
 
 function DecisionsView({ pendingDecisions, historyDecisions, onConfirmPratico }: { pendingDecisions: Request[]; historyDecisions: Request[]; onConfirmPratico: (requestId: number) => Promise<void> }) {
   const [selectedRequest, setSelectedRequest] = useState<Request | null>(null)
   const [decisionDetail, setDecisionDetail] = useState<DecisionDetail | null>(null)
   const [viewingId, setViewingId] = useState<number | null>(null)
   const [confirmingId, setConfirmingId] = useState<number | null>(null)
+  const [subView, setSubView] = useState<'pendentes' | 'historico'>('pendentes')
   const viewDecision = async (item: Request) => {
     setSelectedRequest(item)
     setDecisionDetail(null)
@@ -990,11 +1098,17 @@ function DecisionsView({ pendingDecisions, historyDecisions, onConfirmPratico }:
     try { await onConfirmPratico(requestId) } finally { setConfirmingId(null) }
   }
   return <><PageHeader eyebrow="ÁREA DA ANALISTA" title="Decisões da gestão" subtitle="Atualize o limite no sistema Prático e confirme abaixo — a solicitação sai da fila pendente, vai para o histórico e o vendedor recebe a confirmação por e-mail." />
-    <div className="section-title"><div><h2>Pendentes de confirmação</h2><p>{pendingDecisions.length} decisão(ões) aguardando atualização no Prático</p></div></div>
-    {pendingDecisions.length ? <section className="admin-card"><div className="user-table"><div className="user-head" style={{ gridTemplateColumns: '1.4fr .65fr .55fr .75fr 100px 190px' }}><span>CLIENTE</span><span>PROTOCOLO</span><span>DECISÃO</span><span>LIMITE APROVADO</span><span></span><span></span></div>{pendingDecisions.map((item) => <div className="user-row" key={item.id} style={{ gridTemplateColumns: '1.4fr .65fr .55fr .75fr 100px 190px' }}><div><strong>{item.companyName}</strong><small>Código Prático: {item.clientCode}</small></div><span className="user-role">{item.protocol}</span><span className={item.status === 'APROVADA' ? 'access-active' : 'access-inactive'}><i></i>{statusLabel[item.status]}</span><span className="user-role">{item.status === 'APROVADA' ? money(item.approvedLimit) : '—'}</span><button className="small-action" onClick={() => viewDecision(item)}>{viewingId === item.id ? '...' : 'Ver dossiê'}</button><button className="primary-btn" style={{ padding: '8px 12px', fontSize: 12, boxShadow: 'none' }} disabled={confirmingId === item.id} onClick={() => confirmPratico(item.id)}><Check size={14} /> {confirmingId === item.id ? 'Confirmando...' : 'Confirmar no Prático'}</button></div>)}</div></section> : <div style={{ padding: '40px 30px', textAlign: 'center', background: '#fff', border: '1px solid var(--line)', borderRadius: 8, marginBottom: 28 }}><Check size={30} style={{ color: '#9adcb8', marginBottom: 10 }} /><p className="subheading">Nenhuma decisão pendente. Tudo em dia!</p></div>}
-
-    <div className="section-title" style={{ marginTop: 28 }}><div><h2>Histórico</h2><p>{historyDecisions.length} decisão(ões) já confirmada(s) no Prático</p></div></div>
-    {historyDecisions.length ? <section className="admin-card"><div className="user-table"><div className="user-head" style={{ gridTemplateColumns: '1.4fr .65fr .55fr .75fr 1fr 100px' }}><span>CLIENTE</span><span>PROTOCOLO</span><span>DECISÃO</span><span>LIMITE APROVADO</span><span>CONFIRMADO</span><span></span></div>{historyDecisions.map((item) => <div className="user-row" key={item.id} style={{ gridTemplateColumns: '1.4fr .65fr .55fr .75fr 1fr 100px' }}><div><strong>{item.companyName}</strong><small>Código Prático: {item.clientCode}</small></div><span className="user-role">{item.protocol}</span><span className={item.status === 'APROVADA' ? 'access-active' : 'access-inactive'}><i></i>{statusLabel[item.status]}</span><span className="user-role">{item.status === 'APROVADA' ? money(item.approvedLimit) : '—'}</span><span className="time">{item.praticoConfirmedByName} · {item.praticoConfirmedAt ? formatDateTime(item.praticoConfirmedAt) : '—'}</span><button className="small-action" onClick={() => viewDecision(item)}>{viewingId === item.id ? '...' : 'Ver dossiê'}</button></div>)}</div></section> : <p className="subheading">Nenhum item no histórico ainda.</p>}
+    <div className="subtabs">
+      <button type="button" className={subView === 'pendentes' ? 'subtab active' : 'subtab'} onClick={() => setSubView('pendentes')}>Pendentes de confirmação{pendingDecisions.length > 0 && <span className="subtab-count">{pendingDecisions.length}</span>}</button>
+      <button type="button" className={subView === 'historico' ? 'subtab active' : 'subtab'} onClick={() => setSubView('historico')}>Histórico</button>
+    </div>
+    {subView === 'pendentes' ? <>
+      <div className="section-title"><div><h2>Pendentes de confirmação</h2><p>{pendingDecisions.length} decisão(ões) aguardando atualização no Prático</p></div></div>
+      {pendingDecisions.length ? <section className="admin-card"><div className="user-table"><div className="user-head" style={{ gridTemplateColumns: '1.4fr .65fr .55fr .75fr 100px 190px' }}><span>CLIENTE</span><span>PROTOCOLO</span><span>DECISÃO</span><span>LIMITE APROVADO</span><span></span><span></span></div>{pendingDecisions.map((item) => <div className="user-row" key={item.id} style={{ gridTemplateColumns: '1.4fr .65fr .55fr .75fr 100px 190px' }}><div><strong>{item.companyName}</strong><small>Código Prático: {item.clientCode}</small></div><span className="user-role">{item.protocol}</span><span className={item.status === 'APROVADA' ? 'access-active' : 'access-inactive'}><i></i>{statusLabel[item.status]}</span><span className="user-role">{item.status === 'APROVADA' ? money(item.approvedLimit) : '—'}</span><button className="small-action" onClick={() => viewDecision(item)}>{viewingId === item.id ? '...' : 'Ver dossiê'}</button><button className="primary-btn" style={{ padding: '8px 12px', fontSize: 12, boxShadow: 'none' }} disabled={confirmingId === item.id} onClick={() => confirmPratico(item.id)}><Check size={14} /> {confirmingId === item.id ? 'Confirmando...' : 'Confirmar no Prático'}</button></div>)}</div></section> : <div style={{ padding: '40px 30px', textAlign: 'center', background: '#fff', border: '1px solid var(--line)', borderRadius: 8 }}><Check size={30} style={{ color: '#9adcb8', marginBottom: 10 }} /><p className="subheading">Nenhuma decisão pendente. Tudo em dia!</p></div>}
+    </> : <>
+      <div className="section-title"><div><h2>Histórico</h2><p>{historyDecisions.length} decisão(ões) já confirmada(s) no Prático</p></div></div>
+      {historyDecisions.length ? <section className="admin-card"><div className="user-table"><div className="user-head" style={{ gridTemplateColumns: '1.4fr .65fr .55fr .75fr 1fr 100px' }}><span>CLIENTE</span><span>PROTOCOLO</span><span>DECISÃO</span><span>LIMITE APROVADO</span><span>CONFIRMADO</span><span></span></div>{historyDecisions.map((item) => <div className="user-row" key={item.id} style={{ gridTemplateColumns: '1.4fr .65fr .55fr .75fr 1fr 100px' }}><div><strong>{item.companyName}</strong><small>Código Prático: {item.clientCode}</small></div><span className="user-role">{item.protocol}</span><span className={item.status === 'APROVADA' ? 'access-active' : 'access-inactive'}><i></i>{statusLabel[item.status]}</span><span className="user-role">{item.status === 'APROVADA' ? money(item.approvedLimit) : '—'}</span><span className="time">{item.praticoConfirmedByName} · {item.praticoConfirmedAt ? formatDateTime(item.praticoConfirmedAt) : '—'}</span><button className="small-action" onClick={() => viewDecision(item)}>{viewingId === item.id ? '...' : 'Ver dossiê'}</button></div>)}</div></section> : <p className="subheading">Nenhum item no histórico ainda.</p>}
+    </>}
 
     {selectedRequest && <div className="modal-backdrop"><div className="modal" style={{ maxWidth: 560 }}>
       <div className="modal-head"><div><p className="eyebrow">DOSSIÊ {selectedRequest.protocol}</p><h2>{selectedRequest.companyName}</h2></div><button type="button" onClick={closeDetail}><X size={19} /></button></div>
@@ -1056,5 +1170,5 @@ function ManagementView({ requests, selected, setSelected, decision, onDecision 
   </>
 }
 
-export default App
+export default function AppRoot() { return <ToastProvider><App /></ToastProvider> }
 

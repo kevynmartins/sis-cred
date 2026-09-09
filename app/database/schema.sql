@@ -116,10 +116,6 @@ CREATE TABLE IF NOT EXISTS audit_events (
   INDEX idx_audit_request (request_id)
 ) ENGINE=InnoDB;
 
--- Senha de desenvolvimento para todos os usuários semeados: Sis@Cred123 (troque em produção).
-INSERT INTO users (name, email, role, password_hash) VALUES
-  ('Marina Costa', 'marina.costa@empresa.com.br', 'ANALISTA', '$2b$12$an42pfhuJDT2QOrG.MuPKuZc4hXUDbx3ezZYCEmZxjr.5pPuOP7hW'),
-  ('Carlos Mendes', 'carlos.mendes@empresa.com.br', 'GESTORA', '$2b$12$an42pfhuJDT2QOrG.MuPKuZc4hXUDbx3ezZYCEmZxjr.5pPuOP7hW'),
-  ('André Martins', 'andre.martins@empresa.com.br', 'VENDEDOR', '$2b$12$an42pfhuJDT2QOrG.MuPKuZc4hXUDbx3ezZYCEmZxjr.5pPuOP7hW'),
-  ('Administrador do sistema', 'admin@empresa.com.br', 'ADMIN', '$2b$12$an42pfhuJDT2QOrG.MuPKuZc4hXUDbx3ezZYCEmZxjr.5pPuOP7hW')
-ON DUPLICATE KEY UPDATE name = VALUES(name);
+-- Nenhum usuário é criado por este schema. Para gerar o primeiro administrador (com senha
+-- própria, não uma senha padrão conhecida), veja database/seed-dev-users.sql — use-o apenas
+-- em ambiente de desenvolvimento/teste, nunca em produção.

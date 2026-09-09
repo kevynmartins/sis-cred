@@ -27,19 +27,32 @@ Se o banco já foi criado antes do campo de código Prático, aplique a migratio
 Get-Content .\database\migrations\002_add_client_code.sql -Raw | mariadb -u root -p
 ```
 
-Para criar o usuário administrador em um banco existente:
+### Usuários de desenvolvimento (NUNCA em produção)
+
+`database/schema.sql` **não cria nenhum usuário**. Para ter contas de teste em ambiente local, aplique:
 
 ```powershell
-Get-Content .\database\migrations\003_seed_admin_user.sql -Raw | mariadb -u root -p
+Get-Content .\database\seed-dev-users.sql -Raw | mariadb -u root -p
 ```
 
-O acesso inicial de administração é `admin@empresa.com.br`. Todos os usuários semeados (`admin@empresa.com.br`, `andre.martins@empresa.com.br`, `marina.costa@empresa.com.br`, `carlos.mendes@empresa.com.br`) usam a senha de desenvolvimento `admin123` — troque antes de ir para produção.
+Isso cria `admin@empresa.com.br`, `andre.martins@empresa.com.br`, `marina.costa@empresa.com.br` e `carlos.mendes@empresa.com.br`, todos com a senha `admin123`. Essa senha é pública (está neste repositório) — **use apenas em desenvolvimento**. As migrations `003_seed_admin_user.sql` e `005_reset_seed_passwords.sql` são mantidas por compatibilidade histórica, mas têm o mesmo efeito e a mesma restrição.
 
-Se o banco já existia antes da senha ser adicionada, aplique a migration para atualizar os hashes:
+### Criando o primeiro administrador em produção
 
-```powershell
-Get-Content .\database\migrations\005_reset_seed_passwords.sql -Raw | mariadb -u root -p
+Nunca use o seed de desenvolvimento em produção. Gere um hash bcrypt para uma senha forte e exclusiva:
+
+```bash
+node -e "require('bcryptjs').hash(process.argv[1], 12).then(console.log)" "SUA_SENHA_FORTE_AQUI"
 ```
+
+E insira o usuário com esse hash:
+
+```sql
+INSERT INTO users (name, email, role, password_hash) VALUES
+  ('Nome do administrador', 'admin@suaempresa.com.br', 'ADMIN', '<hash_gerado_acima>');
+```
+
+Troque a senha pelo próprio sistema (Editar perfil → Trocar senha) assim que fizer o primeiro login.
 
 Se o banco já existia antes da foto de perfil ser adicionada, aplique a migration:
 

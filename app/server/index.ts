@@ -3,6 +3,8 @@ import bcrypt from 'bcryptjs'
 import cors from 'cors'
 import { createHash, randomBytes } from 'node:crypto'
 import express, { type NextFunction, type Request, type Response } from 'express'
+import { rateLimit } from 'express-rate-limit'
+import helmet from 'helmet'
 import jwt from 'jsonwebtoken'
 import mariadb from 'mariadb'
 import multer from 'multer'
@@ -20,6 +22,17 @@ const avatarUpload = multer({
   limits: { fileSize: 3 * 1024 * 1024 },
   fileFilter: (_request, file, callback) => callback(null, avatarMimeTypes.includes(file.mimetype)),
 })
+
+// O nome do arquivo (Content-Type) enviado pelo navegador não garante o conteúdo real —
+// por isso conferimos os bytes mágicos antes de aceitar o upload.
+const isPdfBuffer = (buffer: Buffer) => buffer.subarray(0, 5).toString('latin1') === '%PDF-'
+const isValidImageBuffer = (buffer: Buffer, mimetype: string) => {
+  if (mimetype === 'image/jpeg') return buffer.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]))
+  if (mimetype === 'image/png') return buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+  if (mimetype === 'image/webp') return buffer.subarray(0, 4).toString('ascii') === 'RIFF' && buffer.subarray(8, 12).toString('ascii') === 'WEBP'
+  return false
+}
+const sanitizeFilename = (name: string) => Array.from(name).filter((ch) => ch.charCodeAt(0) >= 32 && ch !== String.fromCharCode(34) && ch.charCodeAt(0) !== 127).join('').slice(0, 200) || 'documento'
 
 const app = express()
 const port = Number(process.env.PORT || 3001)
@@ -46,22 +59,50 @@ const mailer = process.env.SMTP_HOST
     })
   : null
 
+// Em produção a API roda atrás de um proxy reverso (Nginx/IIS); isso garante que o
+// limitador de tentativas identifique o IP real do cliente, e não o do proxy.
+if (process.env.TRUST_PROXY) app.set('trust proxy', process.env.TRUST_PROXY)
+app.use(helmet())
 app.use(cors({ origin: process.env.CORS_ORIGIN || 'http://localhost:5173' }))
 app.use(express.json())
+
+const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 20, standardHeaders: true, legacyHeaders: false, message: { message: 'Muitas tentativas. Aguarde alguns minutos e tente novamente.' } })
+const strictAuthLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 8, standardHeaders: true, legacyHeaders: false, message: { message: 'Muitas tentativas. Aguarde alguns minutos e tente novamente.' } })
+const apiLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 600, standardHeaders: true, legacyHeaders: false, message: { message: 'Muitas requisições. Aguarde um momento e tente novamente.' } })
+app.use('/api', apiLimiter)
 
 type UserRole = 'VENDEDOR' | 'ANALISTA' | 'GESTORA' | 'ADMIN'
 type AuthUser = { id: number; name: string; email: string; role: UserRole }
 type AuthRequest = Request & { user?: AuthUser }
+type SseTicket = AuthUser & { purpose: 'sse' }
 
 const authenticate = (request: Request, response: Response, next: NextFunction) => {
   const header = request.headers.authorization
   const token = header?.startsWith('Bearer ') ? header.slice(7) : null
   if (!token) { response.status(401).json({ message: 'Autenticação necessária.' }); return }
   try {
-    const user = jwt.verify(token, jwtSecret) as AuthUser
+    const user = jwt.verify(token, jwtSecret, { algorithms: ['HS256'] }) as AuthUser & { purpose?: string }
+    if (user.purpose) { response.status(401).json({ message: 'Sessão inválida ou expirada.' }); return }
     ;(request as AuthRequest).user = user
     next()
   } catch { response.status(401).json({ message: 'Sessão inválida ou expirada.' }) }
+}
+
+const authenticateSseTicket = (request: Request, response: Response, next: NextFunction) => {
+  const token = typeof request.query.ticket === 'string' ? request.query.ticket : null
+  if (!token) { response.status(401).json({ message: 'Autenticação necessária.' }); return }
+  try {
+    const payload = jwt.verify(token, jwtSecret, { algorithms: ['HS256'] }) as SseTicket
+    if (payload.purpose !== 'sse') { response.status(401).json({ message: 'Sessão inválida ou expirada.' }); return }
+    ;(request as AuthRequest).user = payload
+    next()
+  } catch { response.status(401).json({ message: 'Sessão inválida ou expirada.' }) }
+}
+
+const sseClients = new Set<Response>()
+const broadcast = (event: string, data: Record<string, unknown> = {}) => {
+  const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`
+  for (const client of sseClients) client.write(payload)
 }
 
 const authorize = (...roles: UserRole[]) => (request: Request, response: Response, next: NextFunction) => {
@@ -107,7 +148,7 @@ const validatePassword = (password: unknown): string | null => {
   return null
 }
 
-app.post('/api/auth/register', async (request, response) => {
+app.post('/api/auth/register', authLimiter, async (request, response) => {
   const { name, email, password } = request.body
   if (!name || typeof name !== 'string' || !email || typeof email !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     response.status(400).json({ message: 'Informe nome e e-mail válidos.' })
@@ -135,7 +176,7 @@ app.post('/api/auth/register', async (request, response) => {
   }
 })
 
-app.post('/api/auth/login', async (request, response) => {
+app.post('/api/auth/login', strictAuthLimiter, async (request, response) => {
   const { email, password } = request.body
   if (!email || !password) { response.status(400).json({ message: 'E-mail e senha são obrigatórios.' }); return }
   let connection
@@ -154,7 +195,7 @@ app.post('/api/auth/login', async (request, response) => {
 
 const hashToken = (token: string) => createHash('sha256').update(token).digest('hex')
 
-app.post('/api/auth/forgot-password', async (request, response) => {
+app.post('/api/auth/forgot-password', authLimiter, async (request, response) => {
   const { email } = request.body
   if (!email || typeof email !== 'string') { response.status(400).json({ message: 'Informe o e-mail cadastrado.' }); return }
   const normalizedEmail = email.toLowerCase().trim()
@@ -199,7 +240,7 @@ app.post('/api/auth/forgot-password', async (request, response) => {
   }
 })
 
-app.post('/api/auth/reset-password', async (request, response) => {
+app.post('/api/auth/reset-password', strictAuthLimiter, async (request, response) => {
   const { token, newPassword } = request.body
   if (!token || typeof token !== 'string') { response.status(400).json({ message: 'Link inválido ou expirado.' }); return }
   const passwordError = validatePassword(newPassword)
@@ -231,9 +272,30 @@ app.post('/api/auth/reset-password', async (request, response) => {
 
 app.get('/api/auth/me', authenticate, (request, response) => response.json((request as AuthRequest).user))
 
+// Ticket de curta duração (60s) só para abrir a conexão de eventos — o EventSource do navegador
+// não permite enviar o cabeçalho Authorization, então evitamos colocar o token de sessão na URL.
+app.get('/api/auth/sse-ticket', authenticate, (request, response) => {
+  const { id, name, email, role } = (request as AuthRequest).user!
+  const ticket = jwt.sign({ id, name, email, role, purpose: 'sse' }, jwtSecret, { expiresIn: '60s', algorithm: 'HS256' })
+  response.json({ ticket })
+})
+
+app.get('/api/events', authenticateSseTicket, (request, response) => {
+  response.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  })
+  response.write('retry: 3000\n\n')
+  sseClients.add(response)
+  const heartbeat = setInterval(() => response.write(': ping\n\n'), 25000)
+  request.on('close', () => { clearInterval(heartbeat); sseClients.delete(response) })
+})
+
 app.use('/api', authenticate)
 
-app.post('/api/auth/change-password', async (request, response) => {
+app.post('/api/auth/change-password', strictAuthLimiter, async (request, response) => {
   const authUser = (request as AuthRequest).user
   const { currentPassword, newPassword } = request.body
   if (!currentPassword || !newPassword) { response.status(400).json({ message: 'Informe a senha atual e a nova senha.' }); return }
@@ -283,6 +345,7 @@ app.post('/api/auth/avatar', avatarUpload.single('file'), async (request, respon
   const authUser = (request as AuthRequest).user
   const file = request.file
   if (!file) { response.status(400).json({ message: 'Selecione uma imagem JPG, PNG ou WEBP de até 3MB.' }); return }
+  if (!isValidImageBuffer(file.buffer, file.mimetype)) { response.status(400).json({ message: 'O arquivo enviado não é uma imagem válida.' }); return }
   let connection
   try {
     connection = await pool.getConnection()
@@ -535,6 +598,7 @@ app.post('/api/credit-requests', authorize('VENDEDOR', 'ADMIN'), async (request,
     const requestId = Number(result.insertId)
     await logAuditEvent(connection, requestId, effectiveSellerId, 'SOLICITACAO_CRIADA', { protocol, companyName })
     await connection.commit()
+    broadcast('requests-changed', { requestId, reason: 'created' })
     response.status(201).json({ id: requestId, protocol })
   } catch (error) {
     await connection?.rollback()
@@ -560,6 +624,7 @@ app.patch('/api/credit-requests/:id/status', authorize('ANALISTA', 'ADMIN'), asy
     await connection.query('UPDATE credit_requests SET status = ? WHERE id = ?', [status, requestId])
     await logAuditEvent(connection, requestId, authUser?.id, 'STATUS_ATUALIZADO', { status })
     await connection.commit()
+    broadcast('requests-changed', { requestId, reason: 'status' })
     response.json({ status })
   } catch (error) {
     await connection?.rollback()
@@ -606,6 +671,7 @@ app.post('/api/credit-requests/:id/documents', authorize('VENDEDOR', 'ANALISTA',
   const file = request.file
   if (!requestId || !file) { response.status(400).json({ message: 'Arquivo PDF é obrigatório.' }); return }
   if (!documentTypes.includes(documentType)) { response.status(400).json({ message: 'Tipo de documento inválido.' }); return }
+  if (!isPdfBuffer(file.buffer)) { response.status(400).json({ message: 'O arquivo enviado não é um PDF válido.' }); return }
   let connection
   try {
     connection = await pool.getConnection()
@@ -622,6 +688,27 @@ app.post('/api/credit-requests/:id/documents', authorize('VENDEDOR', 'ANALISTA',
     await connection?.rollback()
     console.error(error)
     response.status(500).json({ message: 'Não foi possível salvar o documento.' })
+  } finally {
+    connection?.release()
+  }
+})
+
+app.delete('/api/documents/:id', authorize('ANALISTA', 'ADMIN'), async (request, response) => {
+  const documentId = Number(request.params.id)
+  const authUser = (request as AuthRequest).user
+  if (!documentId) { response.status(400).json({ message: 'Documento inválido.' }); return }
+  let connection
+  try {
+    connection = await pool.getConnection()
+    const rows = await connection.query('SELECT request_id AS requestId, document_type AS documentType, original_name AS originalName FROM dossier_documents WHERE id = ?', [documentId])
+    const doc = rows[0]
+    if (!doc) { response.status(404).json({ message: 'Documento não encontrado.' }); return }
+    await connection.query('DELETE FROM dossier_documents WHERE id = ?', [documentId])
+    await logAuditEvent(connection, doc.requestId, authUser?.id, 'DOCUMENTO_REMOVIDO', { documentType: doc.documentType, originalName: doc.originalName })
+    response.status(204).end()
+  } catch (error) {
+    console.error(error)
+    response.status(500).json({ message: 'Não foi possível remover o documento.' })
   } finally {
     connection?.release()
   }
@@ -669,7 +756,7 @@ app.get('/api/documents/:id/file', async (request, response) => {
     if (!doc || !doc.fileData) { response.status(404).json({ message: 'Documento não encontrado.' }); return }
     if (authUser?.role === 'VENDEDOR' && doc.sellerId !== authUser.id) { response.status(404).json({ message: 'Documento não encontrado.' }); return }
     response.setHeader('Content-Type', doc.mimeType || 'application/pdf')
-    response.setHeader('Content-Disposition', `inline; filename="${doc.originalName.replace(/"/g, '')}"`)
+    response.setHeader('Content-Disposition', `inline; filename="${sanitizeFilename(doc.originalName || 'documento.pdf')}"`)
     response.send(doc.fileData)
   } catch (error) {
     console.error(error)
@@ -705,14 +792,15 @@ app.patch('/api/credit-requests/:id/decision', authorize('GESTORA', 'ADMIN'), as
     )
     await logAuditEvent(connection, requestId, managerId, 'DECISAO_REGISTRADA', { decision, approvedLimit: approvedLimit || null })
     await connection.commit()
+    broadcast('requests-changed', { requestId, reason: 'decision' })
 
     let emailSent = false
     let emailError: string | null = null
     if (recipientEmail && mailer) {
       const subject = `Resultado da análise de crédito - ${requestRow.protocol}`
       const text = decision === 'APROVADA'
-        ? `Olá,\n\nA solicitação de crédito ${requestRow.protocol} (${requestRow.companyName}) foi APROVADA.\nLimite aprovado: ${Number(approvedLimit || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}\n\nSis-Cred Cadastro e Crédito`
-        : `Olá,\n\nA solicitação de crédito ${requestRow.protocol} (${requestRow.companyName}) foi NEGADA.\n\nSis-Cred Cadastro e Crédito`
+        ? `Olá,\n\nA solicitação de crédito ${requestRow.protocol} (${requestRow.companyName}) foi APROVADA.\nLimite aprovado: ${Number(approvedLimit || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}\n\nEste limite ainda não foi atualizado no sistema Prático e está aguardando a analista realizar essa atualização. Assim que o Prático for atualizado, você receberá um novo e-mail confirmando a liberação.\n\nSis-Cred Cadastro e Crédito`
+        : `Olá,\n\nA solicitação de crédito ${requestRow.protocol} (${requestRow.companyName}) foi NEGADA.\n\nEste resultado ainda não foi registrado no sistema Prático e está aguardando a analista realizar essa atualização. Assim que o Prático for atualizado, você receberá um novo e-mail confirmando o registro.\n\nSis-Cred Cadastro e Crédito`
       try {
         await mailer.sendMail({ from: process.env.SMTP_FROM || process.env.SMTP_USER, to: recipientEmail, subject, text })
         emailSent = true
@@ -750,6 +838,7 @@ app.patch('/api/credit-requests/:id/pratico-confirm', authorize('ANALISTA', 'ADM
     if (requestRow.praticoConfirmedAt) { response.status(409).json({ message: 'Esta atualização já havia sido confirmada.' }); return }
     await connection.query('UPDATE credit_requests SET pratico_confirmed_at = NOW(), pratico_confirmed_by = ? WHERE id = ?', [authUser?.id, requestId])
     await logAuditEvent(connection, requestId, authUser?.id, 'PRATICO_CONFIRMADO', { status: requestRow.status })
+    broadcast('requests-changed', { requestId, reason: 'pratico-confirm' })
 
     let emailSent = false
     let emailError: string | null = null
@@ -773,6 +862,20 @@ app.patch('/api/credit-requests/:id/pratico-confirm', authorize('ANALISTA', 'ADM
   } finally {
     connection?.release()
   }
+})
+
+// Handler de erro global: garante que nenhuma falha inesperada (ex.: JSON malformado no corpo
+// da requisição, ou limite de tamanho de upload do Multer) devolva detalhes internos ao cliente.
+app.use((error: unknown, _request: Request, response: Response, _next: NextFunction) => {
+  console.error(error)
+  if (response.headersSent) return
+  const status = typeof (error as { status?: number; statusCode?: number })?.status === 'number'
+    ? (error as { status: number }).status
+    : typeof (error as { statusCode?: number })?.statusCode === 'number'
+      ? (error as { statusCode: number }).statusCode
+      : 500
+  const safeStatus = status >= 400 && status < 500 ? status : 500
+  response.status(safeStatus).json({ message: safeStatus === 500 ? 'Erro interno do servidor.' : 'Requisição inválida.' })
 })
 
 app.listen(port, () => console.log(`API de crédito ouvindo em http://localhost:${port}`))
