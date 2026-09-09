@@ -1,0 +1,10 @@
+app/node_modules/
+app/dist/
+app/dist-server/
+app/.env
+app/.env.*
+!app/.env.example
+!app/.env.production.example
+
+# Documentos e materiais de referência do negócio (dados reais de clientes) — nunca versionar.
+informações/
