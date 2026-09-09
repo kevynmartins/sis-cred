@@ -40,8 +40,7 @@ FLUSH PRIVILEGES;
 EXIT;
 ```
 
-Carregue o schema (já cria as tabelas e os usuários de demonstração — veja o checklist
-em `DEPLOYMENT.md` para trocá-los depois):
+Carregue o schema (só cria as tabelas — nenhum usuário é criado automaticamente):
 
 ```bash
 mariadb -u root -p < database/schema.sql
@@ -49,19 +48,30 @@ mariadb -u root -p < database/schema.sql
 
 ## 3. Obter o código e instalar dependências
 
+Clone o repositório que você já configurou no GitHub/GitLab (veja
+["Fluxo de atualização via Git"](./DEPLOYMENT.md#fluxo-de-atualização-via-git) em
+`DEPLOYMENT.md` se ainda não configurou):
+
 ```bash
 sudo mkdir -p /opt/sis-cred
 sudo chown $USER:$USER /opt/sis-cred
-# copie/clone o conteúdo da pasta app/ para /opt/sis-cred
-cd /opt/sis-cred
+git clone <url-do-seu-repositorio> /opt/sis-cred
+cd /opt/sis-cred/app
 npm ci
 ```
+
+A partir daqui, todos os comandos deste guia rodam dentro de `/opt/sis-cred/app`.
+
+**Não rode `database/seed-dev-users.sql` neste servidor** — ele cria usuários com uma
+senha pública, só serve para desenvolvimento local. Para criar o primeiro administrador
+de produção, veja "Criando o primeiro administrador em produção" no `README.md` do
+projeto.
 
 ## 4. Configurar variáveis de ambiente
 
 ```bash
 cp .env.production.example .env
-nano .env   # preencha DB_PASSWORD, JWT_SECRET, CORS_ORIGIN, SMTP_*
+nano .env   # preencha DB_PASSWORD, JWT_SECRET, CORS_ORIGIN, SMTP_*, TRUST_PROXY=1
 chmod 600 .env
 ```
 
@@ -88,12 +98,20 @@ sudo cp deploy/systemd/sis-cred-api.service /etc/systemd/system/sis-cred-api.ser
 sudo nano /etc/systemd/system/sis-cred-api.service   # confirme os caminhos e o usuário
 ```
 
-Crie um usuário de sistema dedicado (sem privilégios de login/shell) para rodar o processo:
+Crie um usuário de sistema dedicado (sem privilégios de login/shell) para rodar o processo.
+Ele só precisa de permissão de **leitura** — quem faz `git pull`/build continua sendo o seu
+usuário normal, o que deixa `deploy/linux/update.sh` simples de rodar sem trocar de usuário:
 
 ```bash
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin siscred
-sudo chown -R siscred:siscred /opt/sis-cred
+sudo usermod -aG siscred "$USER"          # seu usuário entra no grupo do serviço
+sudo chgrp -R siscred /opt/sis-cred
+sudo chmod -R g+rX /opt/sis-cred
+sudo setfacl -R -d -m g:siscred:rX /opt/sis-cred   # novos arquivos herdam a permissão de leitura
+newgrp siscred                            # aplica o novo grupo nesta sessão de terminal
 ```
+
+(`setfacl` vem do pacote `acl`: `sudo apt install -y acl`, caso não esteja instalado.)
 
 Ative e inicie:
 
@@ -148,14 +166,18 @@ Nginx (80/443) e SSH.
 
 ## 10. Atualizações
 
+Depois de desenvolver e testar na sua máquina e dar `git push` para o repositório
+remoto (veja ["Fluxo de atualização via Git"](./DEPLOYMENT.md#fluxo-de-atualização-via-git)
+em `DEPLOYMENT.md`), rode no servidor:
+
 ```bash
-cd /opt/sis-cred
-git pull   # ou copie os arquivos atualizados
-npm ci
-npm run build:prod
-# aplique novas migrations em database/migrations/, se houver
-sudo systemctl restart sis-cred-api
+cd /opt/sis-cred/app
+chmod +x deploy/linux/update.sh   # só na primeira vez
+./deploy/linux/update.sh
 ```
+
+O script baixa o código novo, reinstala dependências, recompila e reinicia o serviço,
+avisando antes se houver migrations novas para aplicar manualmente.
 
 ## 11. Backup do banco
 

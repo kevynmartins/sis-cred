@@ -1,0 +1,11 @@
+# Scripts de shell precisam de quebra de linha LF mesmo sendo commitados de uma
+# máquina Windows — CRLF quebra o "shebang" e o script falha ao rodar no Linux.
+*.sh text eol=lf
+
+# Binários: nunca normalizar quebra de linha.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.pdf binary
+*.docx binary

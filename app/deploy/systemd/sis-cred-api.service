@@ -7,9 +7,10 @@ Wants=mariadb.service
 Type=simple
 User=siscred
 Group=siscred
-WorkingDirectory=/opt/sis-cred
-EnvironmentFile=/opt/sis-cred/.env
-ExecStart=/usr/bin/node /opt/sis-cred/dist-server/index.js
+WorkingDirectory=/opt/sis-cred/app
+EnvironmentFile=/opt/sis-cred/app/.env
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node /opt/sis-cred/app/dist-server/index.js
 Restart=on-failure
 RestartSec=5
 # Endurecimento básico do sandbox systemd

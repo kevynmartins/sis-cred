@@ -103,6 +103,10 @@ Para instalar em um servidor Linux ou Windows, veja o guia completo em
 - [Linux (Nginx + systemd)](./docs/deploy-linux.md)
 - [Windows Server (IIS + NSSM)](./docs/deploy-windows.md)
 
+Para manutenção contínua — desenvolver aqui, testar, e depois publicar as
+atualizações no servidor — veja
+["Fluxo de atualização via Git"](./docs/DEPLOYMENT.md#fluxo-de-atualização-via-git).
+
 Build de produção (frontend + API compilada):
 
 ```bash
