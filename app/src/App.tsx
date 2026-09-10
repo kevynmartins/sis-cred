@@ -10,7 +10,7 @@ type AuthUser = { id: number; name: string; email: string; role: BackendRole; av
 type AppNotification = { id: string; title: string; subtitle: string; onClick: () => void }
 
 const emptyRequest: Request = { id: 0, protocol: '', clientCode: '', companyName: '', tradeName: null, cnpj: '', stateRegistration: null, phone: null, address: null, invoiceEmail: null, financeEmail: null, contactName: null, contactEmail: null, requestPurpose: null, purchaseAuthorization: null, deliveryType: null, deliveryLocation: null, deliveryAddress: null, requestedLimit: null, approvedLimit: null, origin: null, sellerNotes: null, status: 'RECEBIDA', sellerName: '', sellerEmail: '', submittedAt: '', praticoConfirmedAt: null, praticoConfirmedByName: null }
-const apiUrl = 'http://localhost:3001'
+const apiUrl = import.meta.env.DEV ? 'http://localhost:3001' : ''
 const tokenKey = 'sisCredToken'
 const userKey = 'sisCredUser'
 const roleMap: Record<BackendRole, Role> = { VENDEDOR: 'vendedor', ANALISTA: 'analista', GESTORA: 'gestao', ADMIN: 'admin' }
