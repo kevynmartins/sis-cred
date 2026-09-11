@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS dossier_documents (
   original_name VARCHAR(255) NOT NULL,
   file_data LONGBLOB NULL,
   file_size BIGINT UNSIGNED NOT NULL,
+  extracted_data JSON NULL,
   mime_type VARCHAR(100) NOT NULL,
   uploaded_by INT UNSIGNED NOT NULL,
   uploaded_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,

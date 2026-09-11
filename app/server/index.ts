@@ -9,6 +9,7 @@ import jwt from 'jsonwebtoken'
 import mariadb from 'mariadb'
 import multer from 'multer'
 import nodemailer from 'nodemailer'
+import { PDFParse } from 'pdf-parse'
 
 const documentTypes = ['CNPJ', 'CONTRATO_SOCIAL', 'INSCRICAO_ESTADUAL', 'SERASA', 'DEPS', 'OUTRO'] as const
 const upload = multer({
@@ -33,6 +34,97 @@ const isValidImageBuffer = (buffer: Buffer, mimetype: string) => {
   return false
 }
 const sanitizeFilename = (name: string) => Array.from(name).filter((ch) => ch.charCodeAt(0) >= 32 && ch !== String.fromCharCode(34) && ch.charCodeAt(0) !== 127).join('').slice(0, 200) || 'documento'
+
+// Extrai os campos do relatório de Avaliação DEPS diretamente do texto do PDF enviado,
+// em vez de exibir sempre os mesmos valores de um relatório de exemplo.
+type DepsExtractedData = {
+  classification: string
+  suggestedLimit: number
+  positivePercent: number
+  negativePercent: number
+  risk: string | null
+  protests: { count: number; value: number } | null
+  pefin: { count: number; value: number } | null
+  paymentHistoryPercent: number | null
+  consultationsCount: number | null
+}
+const parseBrNumber = (raw: string) => Number(raw.replace(/\./g, '').replace(',', '.'))
+
+// Cada fator (Protesto, Pefin, Histórico de Pagamentos etc.) pode aparecer tanto na
+// seção "Pontos positivos" quanto em "Pontos negativos", dependendo se o resultado
+// daquele cliente foi favorável ou não — por isso não dá pra assumir uma seção fixa.
+// O texto extraído do PDF traz primeiro o bloco de valores (uma linha por fator, na
+// ordem da tabela) e só depois o bloco com os nomes dos fatores, na mesma ordem —
+// então associamos os dois blocos pela posição em vez de tentar casar por nome.
+type SectionRow = { label: string; complement: string }
+const parseSectionRows = (text: string, totalMarker: string, sectionEndMarker: string): SectionRow[] => {
+  const sectionStart = text.indexOf(totalMarker)
+  const headerStart = sectionStart >= 0 ? text.indexOf('Descrição', sectionStart) : -1
+  const sectionEnd = sectionStart >= 0 ? text.indexOf(sectionEndMarker, sectionStart) : -1
+  if (sectionStart < 0 || headerStart < 0 || sectionEnd < 0 || headerStart > sectionEnd) return []
+  const totalLineEnd = text.indexOf('\n', sectionStart)
+  const values = text.slice(totalLineEnd + 1, headerStart).split('\n').map((line) => line.trim()).filter(Boolean)
+  const headerLineEnd = text.indexOf('\n', headerStart)
+  const labels = text.slice(headerLineEnd + 1, sectionEnd).split('\n').map((line) => line.trim()).filter(Boolean)
+  return labels.map((label, index) => ({ label, complement: values[index] ?? '' }))
+}
+const extractDepsData = (text: string): DepsExtractedData | null => {
+  const summaryMatch = text.match(
+    /Política:\s*\n?Atingido:\s*\n?Positivo:\s*\n?Negativo:\s*\n?Classificação:\s*\n?Limite sugerido:\s*\n?[^\n]+\n(-?[\d.,]+)%\n(-?[\d.,]+)%\n(-?[\d.,]+)%\n([^\n]+)\n([\d.,]+)\nFaturamento presumido/,
+  )
+  if (!summaryMatch) return null
+  const [, , positivePercent, negativePercent, classification, suggestedLimit] = summaryMatch
+
+  let risk: string | null = null
+  const riskSectionMatch = text.match(/Limite adotado padrão[\s\S]*?Risco\n([^\n]+)/)
+  if (riskSectionMatch) {
+    const cells = riskSectionMatch[1].split(/\t| {2,}/).map((cell) => cell.trim()).filter(Boolean)
+    risk = cells.length ? cells[cells.length - 1] : null
+  }
+
+  const rows = [
+    ...parseSectionRows(text, 'Pontos positivos - Total:', 'Pontos negativos - Total:'),
+    ...parseSectionRows(text, 'Pontos negativos - Total:', 'Limite adotado padrão'),
+  ]
+  const findRow = (label: string) => rows.find((row) => row.label === label)
+  const parseDebt = (row: SectionRow | undefined) => {
+    const match = row?.complement.match(/Vlr\. total: ([\d.,]+), Qtde: (\d+)/)
+    return match ? { value: parseBrNumber(match[1]), count: Number(match[2]) } : null
+  }
+  const protests = parseDebt(findRow('Protesto'))
+  const pefin = parseDebt(findRow('Pefin'))
+  const historyMatch = findRow('Histórico de Pagamentos')?.complement.match(/Pontual \(%\): ([\d.,]+)/)
+  const paymentHistoryPercent = historyMatch ? parseBrNumber(historyMatch[1]) : null
+
+  let consultationsCount: number | null = null
+  const consultasSectionMatch = text.match(/\nConsultas\n([\s\S]*)$/)
+  if (consultasSectionMatch) {
+    const consultaLines = [...consultasSectionMatch[1].matchAll(/^\S.*\t\d{2}\/\d{2}\/\d{4} \d{2}:\d{2}:\d{2}$/gm)]
+    consultationsCount = consultaLines.length || null
+  }
+
+  return {
+    classification: classification.trim(),
+    suggestedLimit: parseBrNumber(suggestedLimit),
+    positivePercent: parseBrNumber(positivePercent),
+    negativePercent: parseBrNumber(negativePercent),
+    risk,
+    protests,
+    pefin,
+    paymentHistoryPercent,
+    consultationsCount,
+  }
+}
+const extractDepsFromPdf = async (buffer: Buffer): Promise<DepsExtractedData | null> => {
+  try {
+    const parser = new PDFParse({ data: buffer })
+    const result = await parser.getText()
+    return extractDepsData(result.text)
+  } catch (error) {
+    console.error('Falha ao extrair dados do PDF de Avaliação DEPS.', error)
+    return null
+  }
+}
 
 const app = express()
 const port = Number(process.env.PORT || 3001)
@@ -672,18 +764,19 @@ app.post('/api/credit-requests/:id/documents', authorize('VENDEDOR', 'ANALISTA',
   if (!requestId || !file) { response.status(400).json({ message: 'Arquivo PDF é obrigatório.' }); return }
   if (!documentTypes.includes(documentType)) { response.status(400).json({ message: 'Tipo de documento inválido.' }); return }
   if (!isPdfBuffer(file.buffer)) { response.status(400).json({ message: 'O arquivo enviado não é um PDF válido.' }); return }
+  const extractedData = documentType === 'DEPS' ? await extractDepsFromPdf(file.buffer) : null
   let connection
   try {
     connection = await pool.getConnection()
     if (!(await ensureRequestAccess(connection, requestId, authUser))) { response.status(404).json({ message: 'Solicitação não encontrada.' }); return }
     await connection.beginTransaction()
     const result = await connection.query(
-      'INSERT INTO dossier_documents (request_id, document_type, original_name, file_data, file_size, mime_type, uploaded_by) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [requestId, documentType, file.originalname, file.buffer, file.size, file.mimetype, authUser?.id],
+      'INSERT INTO dossier_documents (request_id, document_type, original_name, file_data, file_size, extracted_data, mime_type, uploaded_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [requestId, documentType, file.originalname, file.buffer, file.size, extractedData ? JSON.stringify(extractedData) : null, file.mimetype, authUser?.id],
     )
     await logAuditEvent(connection, requestId, authUser?.id, 'DOCUMENTO_ENVIADO', { documentType, originalName: file.originalname })
     await connection.commit()
-    response.status(201).json({ id: Number(result.insertId), documentType, originalName: file.originalname, fileSize: file.size, uploadedAt: new Date().toISOString() })
+    response.status(201).json({ id: Number(result.insertId), documentType, originalName: file.originalname, fileSize: file.size, extractedData, uploadedAt: new Date().toISOString() })
   } catch (error) {
     await connection?.rollback()
     console.error(error)
@@ -724,14 +817,17 @@ app.get('/api/credit-requests/:id/documents', async (request, response) => {
     if (!(await ensureRequestAccess(connection, requestId, authUser))) { response.status(404).json({ message: 'Solicitação não encontrada.' }); return }
     const rows = await connection.query(
       `SELECT d.id, d.document_type AS documentType, d.original_name AS originalName, d.file_size AS fileSize,
-        d.uploaded_at AS uploadedAt, u.name AS uploadedByName
+        d.extracted_data AS extractedData, d.uploaded_at AS uploadedAt, u.name AS uploadedByName
        FROM dossier_documents d
        INNER JOIN users u ON u.id = d.uploaded_by
        WHERE d.request_id = ?
        ORDER BY d.uploaded_at DESC`,
       [requestId],
     )
-    response.json(rows)
+    response.json(rows.map((row: Record<string, unknown>) => ({
+      ...row,
+      extractedData: typeof row.extractedData === 'string' ? JSON.parse(row.extractedData) : row.extractedData,
+    })))
   } catch (error) {
     console.error(error)
     response.status(500).json({ message: 'Não foi possível consultar os documentos.' })
