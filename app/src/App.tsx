@@ -1,20 +1,21 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
-import { Activity, ArrowLeft, ArrowUpRight, Bell, Building2, Camera, Check, CheckCircle2, ChevronDown, ChevronUp, ClipboardCheck, ClipboardList, Download, FileCheck2, FileText, Info, LogOut, Menu, MessageSquareText, Paperclip, Pencil, Phone, Plus, Search, Send, ShieldCheck, Trash2, UploadCloud, Users, X, XCircle } from 'lucide-react'
+import { Activity, ArrowLeft, ArrowUpRight, Bell, Building2, Camera, Check, CheckCircle2, ChevronDown, ChevronUp, ClipboardCheck, ClipboardList, Download, Eye, FileCheck2, FileText, Info, LogOut, Menu, MessageSquareText, Paperclip, Pencil, Phone, Plus, RotateCcw, Search, Send, ShieldCheck, Trash2, UploadCloud, Users, X, XCircle } from 'lucide-react'
 import './App.css'
 
 type Role = 'vendedor' | 'analista' | 'gestao' | 'admin'
 type BackendRole = 'VENDEDOR' | 'ANALISTA' | 'GESTORA' | 'ADMIN'
-type Status = 'RECEBIDA' | 'EM_ANALISE' | 'AGUARDANDO_GESTAO' | 'APROVADA' | 'NEGADA'
-type Request = { id: number; protocol: string; clientCode: string; companyName: string; tradeName: string | null; cnpj: string; stateRegistration: string | null; phone: string | null; address: string | null; invoiceEmail: string | null; financeEmail: string | null; contactName: string | null; contactEmail: string | null; requestPurpose: string | null; purchaseAuthorization: string | null; deliveryType: string | null; deliveryLocation: string | null; deliveryAddress: string | null; requestedLimit: number | null; approvedLimit: number | null; origin: string | null; sellerNotes: string | null; status: Status; sellerName: string; sellerEmail: string; submittedAt: string; praticoConfirmedAt: string | null; praticoConfirmedByName: string | null }
+type Status = 'RECEBIDA' | 'EM_ANALISE' | 'AGUARDANDO_GESTAO' | 'APROVADA' | 'NEGADA' | 'DEVOLVIDA'
+type Request = { id: number; protocol: string; clientCode: string; companyName: string; tradeName: string | null; cnpj: string; stateRegistration: string | null; phone: string | null; address: string | null; invoiceEmail: string | null; financeEmail: string | null; contactName: string | null; contactEmail: string | null; requestPurpose: string | null; purchaseAuthorization: string | null; deliveryType: string | null; deliveryLocation: string | null; deliveryAddress: string | null; requestedLimit: number | null; approvedLimit: number | null; origin: string | null; sellerNotes: string | null; returnReason: string | null; status: Status; sellerName: string; sellerEmail: string; sellerCode: string | null; sellerStore: string | null; sellerManagerName: string | null; sellerWhatsapp: string | null; submittedAt: string; praticoConfirmedAt: string | null; praticoConfirmedByName: string | null }
 type AuthUser = { id: number; name: string; email: string; role: BackendRole; avatarUrl?: string | null }
 type AppNotification = { id: string; title: string; subtitle: string; onClick: () => void }
 
-const emptyRequest: Request = { id: 0, protocol: '', clientCode: '', companyName: '', tradeName: null, cnpj: '', stateRegistration: null, phone: null, address: null, invoiceEmail: null, financeEmail: null, contactName: null, contactEmail: null, requestPurpose: null, purchaseAuthorization: null, deliveryType: null, deliveryLocation: null, deliveryAddress: null, requestedLimit: null, approvedLimit: null, origin: null, sellerNotes: null, status: 'RECEBIDA', sellerName: '', sellerEmail: '', submittedAt: '', praticoConfirmedAt: null, praticoConfirmedByName: null }
+const emptyRequest: Request = { id: 0, protocol: '', clientCode: '', companyName: '', tradeName: null, cnpj: '', stateRegistration: null, phone: null, address: null, invoiceEmail: null, financeEmail: null, contactName: null, contactEmail: null, requestPurpose: null, purchaseAuthorization: null, deliveryType: null, deliveryLocation: null, deliveryAddress: null, requestedLimit: null, approvedLimit: null, origin: null, sellerNotes: null, returnReason: null, status: 'RECEBIDA', sellerName: '', sellerEmail: '', sellerCode: null, sellerStore: null, sellerManagerName: null, sellerWhatsapp: null, submittedAt: '', praticoConfirmedAt: null, praticoConfirmedByName: null }
 const apiUrl = import.meta.env.DEV ? 'http://localhost:3001' : ''
 const tokenKey = 'sisCredToken'
 const userKey = 'sisCredUser'
 const roleMap: Record<BackendRole, Role> = { VENDEDOR: 'vendedor', ANALISTA: 'analista', GESTORA: 'gestao', ADMIN: 'admin' }
 const money = (value: number | null) => (value == null ? 'A definir' : value.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }))
+const whatsappLink = (raw: string) => `https://wa.me/55${raw.replace(/\D/g, '')}`
 const formatCnpj = (raw: string) => {
   let clean = ''
   for (const char of raw.toUpperCase()) {
@@ -36,7 +37,7 @@ const formatCnpj = (raw: string) => {
 }
 const initials = (name: string) => name.trim().split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase() || '').join('') || '?'
 const avatarMimeTypes = ['image/jpeg', 'image/png', 'image/webp']
-const statusLabel: Record<Status, string> = { RECEBIDA: 'Recebida', EM_ANALISE: 'Em análise', AGUARDANDO_GESTAO: 'Aguardando gestão', APROVADA: 'Aprovada', NEGADA: 'Negada' }
+const statusLabel: Record<Status, string> = { RECEBIDA: 'Recebida', EM_ANALISE: 'Em análise', AGUARDANDO_GESTAO: 'Aguardando gestão', APROVADA: 'Aprovada', NEGADA: 'Negada', DEVOLVIDA: 'Devolvida para ajustes' }
 
 const apiFetch = async (path: string, options: RequestInit = {}) => {
   const token = localStorage.getItem(tokenKey)
@@ -140,6 +141,7 @@ function App() {
   const [showChangePassword, setShowChangePassword] = useState(false)
   const [showEditProfile, setShowEditProfile] = useState(false)
   const [view, setView] = useState<'main' | 'users' | 'audit' | 'decisions' | 'requests'>('main')
+  const [editingRequest, setEditingRequest] = useState<Request | null>(null)
   const [profileMenuOpen, setProfileMenuOpen] = useState(false)
   const [notifMenuOpen, setNotifMenuOpen] = useState(false)
   const [avatarSrc, setAvatarSrc] = useState<string | null>(null)
@@ -269,6 +271,38 @@ function App() {
     }
     return null
   }
+  const resendRequest = async (requestId: number, form: HTMLFormElement, contractFile: File | null): Promise<string | null> => {
+    const data = new FormData(form)
+    const joinMultiple = (name: string) => data.getAll(name).map((value) => String(value).trim()).filter(Boolean).join('; ')
+    const payload = {
+      clientCode: data.get('clientCode'), companyName: data.get('companyName'), tradeName: data.get('tradeName'),
+      cnpj: data.get('cnpj'), stateRegistration: data.get('stateRegistration'), phone: joinMultiple('phone'), address: data.get('address'),
+      invoiceEmail: data.get('invoiceEmail'), financeEmail: data.get('financeEmail'), contactName: joinMultiple('contactName'), contactEmail: joinMultiple('contactEmail'),
+      requestPurpose: data.get('requestPurpose'), purchaseAuthorization: data.get('purchaseAuthorization'),
+      deliveryType: data.get('deliveryType'), deliveryLocation: data.get('deliveryLocation'), deliveryAddress: data.get('deliveryAddress'),
+      origin: data.get('origin'), sellerNotes: data.get('sellerNotes'),
+    }
+    const response = await apiFetch(`/api/credit-requests/${requestId}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
+    if (!response.ok) { const body = await response.json().catch(() => null); return body?.message || 'Confira os campos obrigatórios da ficha.' }
+    let contractUploadFailed = false
+    if (contractFile) {
+      const uploadResponse = await uploadDocument(requestId, 'CONTRATO_SOCIAL', contractFile).catch(() => null)
+      contractUploadFailed = !uploadResponse || !uploadResponse.ok
+    }
+    await loadRequests()
+    setEditingRequest(null)
+    setView('requests')
+    if (contractUploadFailed) {
+      const message = 'Cadastro reenviado, mas o novo contrato social não foi salvo — reenvie o PDF com a analista.'
+      pushToast('error', message)
+      setBurst({ ok: false, title: 'Reenviado com pendência', message })
+    } else {
+      const message = 'Cadastro corrigido e reenviado para a analista.'
+      pushToast('success', message)
+      setBurst({ ok: true, title: 'Cadastro reenviado!', message })
+    }
+    return null
+  }
   const updateStatus = async (nextStatus: Status, approvedLimit?: number, recipientEmail?: string, internalReason?: string, clientMessage?: string) => {
     let loaded = requests
     let emailSent = false
@@ -306,6 +340,11 @@ function App() {
       setBurst({ ok: true, title: 'Dossiê enviado!', message })
     }
   }
+  const handleReturnedToSeller = async () => {
+    const loaded = await loadRequests()
+    const next = loaded.find((item) => item.status === 'RECEBIDA' || item.status === 'EM_ANALISE')
+    setSelected(next || emptyRequest)
+  }
   const logout = () => { localStorage.removeItem(tokenKey); localStorage.removeItem(userKey); setUser(null) }
 
   const pageLoadingBar = pageLoading && <div className="page-loading-bar"><span></span></div>
@@ -314,7 +353,7 @@ function App() {
   if (!user || !role) return <>{pageLoadingBar}<LoginScreen onLogin={(loggedUser) => setUser(loggedUser)} /></>
 
   return <>{pageLoadingBar}<div className="app-shell">
-    <aside className="sidebar"><div className="brand"><img src="/logo_sc.jpg" alt="Sis-Cred" className="brand-logo" /></div><div className="workspace-label">ACESSO ATUAL</div><div className="current-role"><div className="role-icon">{role === 'vendedor' ? <Users size={16} /> : role === 'analista' ? <ClipboardCheck size={16} /> : <ShieldCheck size={16} />}</div><div><strong>{role === 'vendedor' ? 'Vendedor' : role === 'analista' ? 'Analista' : role === 'gestao' ? 'Gestão' : 'Administrador'}</strong><small>Acesso autorizado</small></div></div>{(role === 'admin' || role === 'gestao') && <div className="role-switcher" style={{ marginTop: 18 }}><button className={view === 'main' ? 'nav-item active' : 'nav-item'} onClick={() => setView('main')}>{role === 'admin' ? <Activity size={18} /> : <ShieldCheck size={18} />}<span>{role === 'admin' ? 'Administração' : 'Decisão de crédito'}</span></button><button className={view === 'users' ? 'nav-item active' : 'nav-item'} onClick={() => setView('users')}><Users size={18} /><span>Usuários</span></button><button className={view === 'audit' ? 'nav-item active' : 'nav-item'} onClick={() => setView('audit')}><FileCheck2 size={18} /><span>Auditoria</span></button></div>}{role === 'analista' && <div className="role-switcher" style={{ marginTop: 18 }}><button className={view === 'main' ? 'nav-item active' : 'nav-item'} onClick={() => setView('main')}><ClipboardCheck size={18} /><span>Triagem e dossiê</span></button><button className={view === 'decisions' ? 'nav-item active' : 'nav-item'} onClick={() => setView('decisions')}><FileCheck2 size={18} /><span>Decisões</span>{pendingDecisions.length > 0 && <span className="pending-dot">{pendingDecisions.length}</span>}</button></div>}{role === 'vendedor' && <div className="role-switcher" style={{ marginTop: 18 }}><button className={view === 'main' ? 'nav-item active' : 'nav-item'} onClick={() => setView('main')}><FileText size={18} /><span>Novo cadastro</span></button><button className={view === 'requests' ? 'nav-item active' : 'nav-item'} onClick={() => setView('requests')}><ClipboardCheck size={18} /><span>Minhas solicitações</span></button></div>}<div className="sidebar-bottom"><div className="help-box"><span>Processo digital</span><small>Sem papel no dossiê</small><ArrowUpRight size={16} /></div></div></aside>
+    <aside className="sidebar"><div className="brand"><img src="/logo_sc.jpg" alt="Sis-Cred" className="brand-logo" /></div><div className="workspace-label">ACESSO ATUAL</div><div className="current-role"><div className="role-icon">{role === 'vendedor' ? <Users size={16} /> : role === 'analista' ? <ClipboardCheck size={16} /> : <ShieldCheck size={16} />}</div><div><strong>{role === 'vendedor' ? 'Vendedor' : role === 'analista' ? 'Analista' : role === 'gestao' ? 'Gestão' : 'Administrador'}</strong><small>Acesso autorizado</small></div></div>{(role === 'admin' || role === 'gestao') && <div className="role-switcher" style={{ marginTop: 18 }}><button className={view === 'main' ? 'nav-item active' : 'nav-item'} onClick={() => setView('main')}>{role === 'admin' ? <Activity size={18} /> : <ShieldCheck size={18} />}<span>{role === 'admin' ? 'Administração' : 'Decisão de crédito'}</span></button><button className={view === 'users' ? 'nav-item active' : 'nav-item'} onClick={() => setView('users')}><Users size={18} /><span>Usuários</span></button><button className={view === 'audit' ? 'nav-item active' : 'nav-item'} onClick={() => setView('audit')}><FileCheck2 size={18} /><span>Auditoria</span></button></div>}{role === 'analista' && <div className="role-switcher" style={{ marginTop: 18 }}><button className={view === 'main' ? 'nav-item active' : 'nav-item'} onClick={() => setView('main')}><ClipboardCheck size={18} /><span>Triagem e dossiê</span></button><button className={view === 'decisions' ? 'nav-item active' : 'nav-item'} onClick={() => setView('decisions')}><FileCheck2 size={18} /><span>Decisões</span>{pendingDecisions.length > 0 && <span className="pending-dot">{pendingDecisions.length}</span>}</button></div>}{role === 'vendedor' && <div className="role-switcher" style={{ marginTop: 18 }}><button className={view === 'main' ? 'nav-item active' : 'nav-item'} onClick={() => { setEditingRequest(null); setView('main') }}><FileText size={18} /><span>Novo cadastro</span></button><button className={view === 'requests' ? 'nav-item active' : 'nav-item'} onClick={() => setView('requests')}><ClipboardCheck size={18} /><span>Minhas solicitações</span></button></div>}<div className="sidebar-bottom"><div className="help-box"><span>Processo digital</span><small>Sem papel no dossiê</small><ArrowUpRight size={16} /></div></div></aside>
     <main className="main-content"><header className="topbar"><button className="mobile-menu"><Menu size={21} /></button><div className="breadcrumb">Sis-Cred <span>/</span> <b>{view === 'audit' ? 'Auditoria' : view === 'users' ? 'Usuários' : view === 'decisions' ? 'Decisões' : view === 'requests' ? 'Minhas solicitações' : role === 'vendedor' ? 'Novo cadastro' : role === 'analista' ? 'Triagem e dossiê' : role === 'gestao' ? 'Decisão de crédito' : 'Administração'}</b></div><div className="top-actions">
         <div className="menu-wrap" ref={notifMenuRef}>
           <button type="button" className="icon-btn" onClick={() => { setNotifMenuOpen((open) => !open); setProfileMenuOpen(false) }}><Bell size={19} />{notifications.length > 0 && <i></i>}</button>
@@ -336,7 +375,7 @@ function App() {
           </div>}
         </div>
       </div></header>
-      <div className="content-wrap"><div key={view} className="page-enter">{view === 'audit' && (role === 'admin' || role === 'gestao') ? <AuditView requests={items} /> : view === 'users' && (role === 'admin' || role === 'gestao') ? <UserManagementView isAdmin={role === 'admin'} /> : view === 'decisions' && role === 'analista' ? <DecisionsView pendingDecisions={pendingDecisions} historyDecisions={historyDecisions} onConfirmPratico={confirmPraticoUpdate} /> : view === 'requests' && role === 'vendedor' ? <SellerRequestsView requests={items} onNew={() => setView('main')} /> : <>{role === 'vendedor' && <SellerForm onSubmit={createRequest} />}{role === 'analista' && <AnalystView requests={triageItems} selected={selected} setSelected={setSelected} onSend={() => updateStatus('AGUARDANDO_GESTAO')} />}{role === 'gestao' && <ManagementView requests={items.filter((item) => item.status === 'AGUARDANDO_GESTAO')} selected={selected} setSelected={setSelected} decision={decision} onDecision={updateStatus} />}{role === 'admin' && <AdminView />}</>}</div></div></main>
+      <div className="content-wrap"><div key={view} className="page-enter">{view === 'audit' && (role === 'admin' || role === 'gestao') ? <AuditView requests={items} /> : view === 'users' && (role === 'admin' || role === 'gestao') ? <UserManagementView isAdmin={role === 'admin'} /> : view === 'decisions' && role === 'analista' ? <DecisionsView pendingDecisions={pendingDecisions} historyDecisions={historyDecisions} onConfirmPratico={confirmPraticoUpdate} /> : view === 'requests' && role === 'vendedor' ? <SellerRequestsView requests={items} onNew={() => { setEditingRequest(null); setView('main') }} onEdit={(item) => { setEditingRequest(item); setView('main') }} /> : <>{role === 'vendedor' && <SellerForm key={editingRequest?.id ?? 'new'} initialRequest={editingRequest} onSubmit={editingRequest ? (form, file) => resendRequest(editingRequest.id, form, file) : createRequest} />}{role === 'analista' && <AnalystView requests={triageItems} selected={selected} setSelected={setSelected} onSend={() => updateStatus('AGUARDANDO_GESTAO')} onReturned={handleReturnedToSeller} />}{role === 'gestao' && <ManagementView requests={items.filter((item) => item.status === 'AGUARDANDO_GESTAO')} deniedItems={items.filter((item) => item.status === 'NEGADA')} onReloadRequests={loadRequests} selected={selected} setSelected={setSelected} decision={decision} onDecision={updateStatus} />}{role === 'admin' && <AdminView />}</>}</div></div></main>
     {showChangePassword && <ChangePasswordModal onClose={() => setShowChangePassword(false)} onSuccess={() => { setShowChangePassword(false); pushToast('success', 'Senha atualizada com sucesso.') }} />}
     {showEditProfile && <EditProfileModal user={user} avatarSrc={avatarSrc} onClose={() => setShowEditProfile(false)} onSaved={saveProfilePatch} />}
     {burst && <ConfirmationBurst ok={burst.ok} title={burst.title} message={burst.message} onDone={() => setBurst(null)} />}
@@ -445,6 +484,7 @@ const managementRoleOptions = [
 ]
 
 function CreateUserModal({ roleOptions, onClose, onCreated }: { roleOptions: Array<{ value: string; label: string }>; onClose: () => void; onCreated: () => void }) {
+  const [role, setRole] = useState(roleOptions[0].value)
   const [error, setError] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const submit = async (event: React.FormEvent<HTMLFormElement>) => {
@@ -452,13 +492,13 @@ function CreateUserModal({ roleOptions, onClose, onCreated }: { roleOptions: Arr
     setSubmitting(true); setError('')
     const form = new FormData(event.currentTarget)
     try {
-      const response = await apiFetch('/api/admin/users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: form.get('name'), email: form.get('email'), role: form.get('role'), password: form.get('password') }) })
+      const response = await apiFetch('/api/admin/users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: form.get('name'), email: form.get('email'), role: form.get('role'), password: form.get('password'), praticoSellerCode: form.get('praticoSellerCode'), storeName: form.get('storeName'), managerName: form.get('managerName'), whatsappPhone: form.get('whatsappPhone') }) })
       if (!response.ok) { const body = await response.json().catch(() => null); setError(body?.message || 'Não foi possível criar o usuário.'); return }
       onCreated()
     } catch { setError('Não foi possível conectar à API.')
     } finally { setSubmitting(false) }
   }
-  return <div className="modal-backdrop"><form className="modal" onSubmit={submit}><div className="modal-head"><div><p className="eyebrow">NOVO ACESSO</p><h2>Criar usuário</h2></div><button type="button" onClick={onClose}><X size={19} /></button></div><p className="modal-copy">Defina o acesso e a senha inicial. O usuário poderá trocá-la depois de entrar.</p><label>Nome completo<input name="name" required placeholder="Nome do colaborador" /></label><label>E-mail corporativo<input name="email" required type="email" placeholder="colaborador@empresa.com.br" /></label><label>Função<select name="role" defaultValue={roleOptions[0].value}>{roleOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label><label>Senha inicial<input name="password" type="password" required placeholder="Defina a senha de acesso" /></label><small className="login-foot"><ShieldCheck size={13} /> {passwordHint}</small>{error && <div className="notice notice-error"><X size={17} /> {error}</div>}<div className="modal-actions"><button type="button" className="cancel-btn" onClick={onClose}>Cancelar</button><button type="submit" className="primary-btn" disabled={submitting}><Check size={17} /> {submitting ? 'Criando...' : 'Criar acesso'}</button></div></form></div>
+  return <div className="modal-backdrop"><form className="modal" onSubmit={submit}><div className="modal-head"><div><p className="eyebrow">NOVO ACESSO</p><h2>Criar usuário</h2></div><button type="button" onClick={onClose}><X size={19} /></button></div><p className="modal-copy">Defina o acesso e a senha inicial. O usuário poderá trocá-la depois de entrar.</p><label>Nome completo<input name="name" required placeholder="Nome do colaborador" /></label><label>E-mail corporativo<input name="email" required type="email" placeholder="colaborador@empresa.com.br" /></label><label>Função<select name="role" value={role} onChange={(event) => setRole(event.target.value)}>{roleOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>{role === 'VENDEDOR' && <><label>Código do vendedor no Prático<input name="praticoSellerCode" required placeholder="Ex.: 1234" /></label><label>Loja<input name="storeName" required placeholder="Loja onde o vendedor trabalha" /></label><label>Nome do gerente<input name="managerName" required placeholder="Gerente responsável pelo vendedor" /></label><label>WhatsApp do vendedor<input name="whatsappPhone" required placeholder="(00) 00000-0000" /></label></>}<label>Senha inicial<input name="password" type="password" required placeholder="Defina a senha de acesso" /></label><small className="login-foot"><ShieldCheck size={13} /> {passwordHint}</small>{error && <div className="notice notice-error"><X size={17} /> {error}</div>}<div className="modal-actions"><button type="button" className="cancel-btn" onClick={onClose}>Cancelar</button><button type="submit" className="primary-btn" disabled={submitting}><Check size={17} /> {submitting ? 'Criando...' : 'Criar acesso'}</button></div></form></div>
 }
 
 function ResetUserPasswordModal({ userName, onClose, onDone, onSubmit }: { userName: string; onClose: () => void; onDone: () => void; onSubmit: (newPassword: string) => Promise<string | null> }) {
@@ -478,7 +518,7 @@ function ResetUserPasswordModal({ userName, onClose, onDone, onSubmit }: { userN
   return <div className="modal-backdrop"><form className="modal" onSubmit={submit}><div className="modal-head"><div><p className="eyebrow">SEGURANÇA DA CONTA</p><h2>Trocar senha de {userName}</h2></div><button type="button" onClick={onClose}><X size={19} /></button></div><p className="modal-copy">Defina uma nova senha para este usuário. Ele poderá trocá-la novamente depois de entrar.</p><label>Nova senha<input type="password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} required autoFocus /></label><label>Confirmar nova senha<input type="password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} required /></label><small className="login-foot"><ShieldCheck size={13} /> {passwordHint}</small>{error && <div className="notice notice-error"><X size={17} /> {error}</div>}<div className="modal-actions"><button type="button" className="cancel-btn" onClick={onClose}>Cancelar</button><button type="submit" className="primary-btn" disabled={submitting}><Check size={17} /> {submitting ? 'Salvando...' : 'Salvar nova senha'}</button></div></form></div>
 }
 
-type ManagedUser = { id: number; name: string; email: string; role: string; active: number }
+type ManagedUser = { id: number; name: string; email: string; role: string; praticoSellerCode: string | null; storeName: string | null; managerName: string | null; whatsappPhone: string | null; active: number }
 
 function UserManagementView({ isAdmin }: { isAdmin: boolean }) {
   const [users, setUsers] = useState<ManagedUser[]>([])
@@ -498,7 +538,7 @@ function UserManagementView({ isAdmin }: { isAdmin: boolean }) {
     <section className="admin-card"><div className="card-heading"><div><h2>Usuários e permissões</h2><p>{isAdmin ? 'Todos os acessos do sistema.' : 'Acessos de vendedores, analistas e gestão.'}</p></div><span className="tag">{users.length} cadastrados</span></div>
       <div className="user-table"><div className="user-head" style={{ gridTemplateColumns: '1.4fr .8fr .8fr 140px 140px' }}><span>USUÁRIO</span><span>FUNÇÃO</span><span>ACESSO</span><span></span><span></span></div>
         {users.map((managedUser) => <div className="user-row" style={{ gridTemplateColumns: '1.4fr .8fr .8fr 140px 140px' }} key={managedUser.id}>
-          <div><strong>{managedUser.name}</strong><small>{managedUser.email}</small></div>
+          <div><strong>{managedUser.name}</strong><small>{managedUser.email}{managedUser.storeName ? ` · ${managedUser.storeName} · Cód. Prático ${managedUser.praticoSellerCode}` : ''}</small></div>
           <span className="user-role">{managedUser.role}</span>
           <span className={managedUser.active ? 'access-active' : 'access-inactive'}><i></i>{managedUser.active ? 'Ativo' : 'Suspenso'}</span>
           <button className="small-action" onClick={() => setResetTarget(managedUser)}>Trocar senha</button>
@@ -513,7 +553,7 @@ function UserManagementView({ isAdmin }: { isAdmin: boolean }) {
 
 function AdminView() { const [overview, setOverview] = useState<{ users: { total: number; active: number }; requests: Array<{ status: string; total: number }>; documents: { total: number }; audit: { total: number } } | null>(null); const pushToast = useToast(); useEffect(() => { apiFetch('/api/admin/overview').then((response) => response.json()).then(setOverview).catch(() => pushToast('error', 'Não foi possível carregar os dados administrativos.')) }, []); return <><PageHeader eyebrow="ADMINISTRAÇÃO DO SISTEMA" title="Controle e conferência" subtitle="Acompanhe a saúde do processo. Para gerenciar acessos, use Usuários no menu." /><section className="admin-metrics"><div><Activity size={19} /><span>Usuários ativos</span><strong>{overview?.users.active ?? '...'}</strong></div><div><FileCheck2 size={19} /><span>Solicitações cadastradas</span><strong>{overview?.requests.reduce((sum, item) => sum + Number(item.total), 0) ?? '...'}</strong></div><div><FileText size={19} /><span>Documentos no dossiê</span><strong>{overview?.documents.total ?? '...'}</strong></div><div><ShieldCheck size={19} /><span>Eventos auditados</span><strong>{overview?.audit.total ?? '...'}</strong></div></section><div className="admin-grid"><section className="admin-card checks-card"><div className="card-heading"><div><h2>Conferências rápidas</h2><p>Visão operacional para manutenção.</p></div></div><div className="check-line"><Check size={16} /><div><strong>Banco de dados</strong><small>MariaDB conectado e respondendo</small></div><b>OK</b></div><div className="check-line"><Check size={16} /><div><strong>Fila de crédito</strong><small>Solicitações por status disponíveis</small></div><b>OK</b></div><div className="check-line"><Check size={16} /><div><strong>Auditoria</strong><small>Decisões registradas no histórico</small></div><b>OK</b></div><div className="check-line"><Check size={16} /><div><strong>Documentos</strong><small>Arquivos vinculados aos dossiês</small></div><b>OK</b></div></section></div></> }
 
-const statusOrder: Status[] = ['RECEBIDA', 'EM_ANALISE', 'AGUARDANDO_GESTAO', 'APROVADA', 'NEGADA']
+const statusOrder: Status[] = ['RECEBIDA', 'EM_ANALISE', 'AGUARDANDO_GESTAO', 'APROVADA', 'NEGADA', 'DEVOLVIDA']
 const documentLabel: Record<string, string> = { CONTRATO_SOCIAL: 'Contrato social / Certificado MEI', SERASA: 'Consulta Serasa', DEPS: 'Avaliação DEPS' }
 
 type AuditEvent = { id: number; requestId: number; eventType: string; eventData: Record<string, unknown> | null; createdAt: string; actorName: string; actorRole: BackendRole; protocol: string; companyName: string; clientCode: string }
@@ -524,6 +564,9 @@ const auditEventLabel: Record<string, string> = {
   STATUS_ATUALIZADO: 'Status atualizado',
   DECISAO_REGISTRADA: 'Decisão registrada',
   PRATICO_CONFIRMADO: 'Confirmado no Prático',
+  DECISAO_REABERTA: 'Decisão reaberta',
+  SOLICITACAO_DEVOLVIDA: 'Cadastro devolvido ao vendedor',
+  SOLICITACAO_REENVIADA: 'Cadastro reenviado pelo vendedor',
 }
 const auditEventDetail = (event: AuditEvent): string => {
   const data = event.eventData
@@ -535,6 +578,9 @@ const auditEventDetail = (event: AuditEvent): string => {
     case 'STATUS_ATUALIZADO': return `Movida para "${statusLabel[data.status as Status] || data.status}"`
     case 'DECISAO_REGISTRADA': return `${data.decision === 'APROVADA' ? 'Aprovada' : 'Negada'}${data.approvedLimit ? ` · ${money(Number(data.approvedLimit))}` : ''}`
     case 'PRATICO_CONFIRMADO': return `Registro confirmado no sistema Prático (${statusLabel[data.status as Status] || data.status})`
+    case 'DECISAO_REABERTA': return `Reaberta e aprovada · ${money(Number(data.approvedLimit))}`
+    case 'SOLICITACAO_DEVOLVIDA': return `Motivo: "${data.reason}"`
+    case 'SOLICITACAO_REENVIADA': return 'Cadastro corrigido e reenviado para triagem'
     default: return '—'
   }
 }
@@ -622,7 +668,7 @@ function AuditView({ requests }: { requests: Request[] }) {
   const allGroupsExpanded = auditGroups.length > 0 && auditGroups.every((group) => expandedRequestIds.has(group.requestId))
   const toggleAllGroups = () => setExpandedRequestIds(allGroupsExpanded ? new Set() : new Set(auditGroups.map((group) => group.requestId)))
 
-  const counts: Record<Status, number> = { RECEBIDA: 0, EM_ANALISE: 0, AGUARDANDO_GESTAO: 0, APROVADA: 0, NEGADA: 0 }
+  const counts: Record<Status, number> = { RECEBIDA: 0, EM_ANALISE: 0, AGUARDANDO_GESTAO: 0, APROVADA: 0, NEGADA: 0, DEVOLVIDA: 0 }
   for (const item of requests) counts[item.status]++
   const filtered = statusFilter === 'ALL' ? requests : requests.filter((item) => item.status === statusFilter)
 
@@ -734,11 +780,15 @@ function LoginScreen({ onLogin }: { onLogin: (user: AuthUser) => void }) {
   const [password, setPassword] = useState('')
   const [name, setName] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
+  const [praticoSellerCode, setPraticoSellerCode] = useState('')
+  const [storeName, setStoreName] = useState('')
+  const [managerName, setManagerName] = useState('')
+  const [whatsappPhone, setWhatsappPhone] = useState('')
   const [forgotEmail, setForgotEmail] = useState('')
   const [forgotSent, setForgotSent] = useState(false)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
-  const switchMode = (nextMode: 'login' | 'register' | 'forgot') => { setMode(nextMode); setError(''); setEmail(''); setPassword(''); setConfirmPassword(''); setForgotEmail(''); setForgotSent(false) }
+  const switchMode = (nextMode: 'login' | 'register' | 'forgot') => { setMode(nextMode); setError(''); setEmail(''); setPassword(''); setConfirmPassword(''); setPraticoSellerCode(''); setStoreName(''); setManagerName(''); setWhatsappPhone(''); setForgotEmail(''); setForgotSent(false) }
   const submitForgot = async () => {
     if (!forgotEmail) { setError('Informe seu e-mail.'); return }
     setLoading(true); setError('')
@@ -764,11 +814,11 @@ function LoginScreen({ onLogin }: { onLogin: (user: AuthUser) => void }) {
     } finally { setLoading(false) }
   }
   const submitRegister = async () => {
-    if (!name || !email || !password || !confirmPassword) { setError('Preencha todos os campos.'); return }
+    if (!name || !email || !password || !confirmPassword || !praticoSellerCode || !storeName || !managerName || !whatsappPhone) { setError('Preencha todos os campos.'); return }
     if (password !== confirmPassword) { setError('As senhas não coincidem.'); return }
     setLoading(true); setError('')
     try {
-      const response = await fetch(`${apiUrl}/api/auth/register`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, email, password }) })
+      const response = await fetch(`${apiUrl}/api/auth/register`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, email, password, praticoSellerCode, storeName, managerName, whatsappPhone }) })
       const data = await response.json()
       if (!response.ok) { setError(data.message || 'Não foi possível criar sua conta.'); return }
       localStorage.setItem(tokenKey, data.token)
@@ -793,6 +843,10 @@ function LoginScreen({ onLogin }: { onLogin: (user: AuthUser) => void }) {
       ? <form onSubmit={(event) => { event.preventDefault(); submitRegister() }}>
           <label className="login-label">Nome completo<input type="text" value={name} onChange={(event) => setName(event.target.value)} required /></label>
           <label className="login-label">E-mail<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} required /></label>
+          <label className="login-label">Código do vendedor no Prático<input type="text" value={praticoSellerCode} onChange={(event) => setPraticoSellerCode(event.target.value)} placeholder="Ex.: 1234" required /></label>
+          <label className="login-label">Loja<input type="text" value={storeName} onChange={(event) => setStoreName(event.target.value)} placeholder="Loja onde você trabalha" required /></label>
+          <label className="login-label">Nome do gerente<input type="text" value={managerName} onChange={(event) => setManagerName(event.target.value)} placeholder="Gerente responsável por você" required /></label>
+          <label className="login-label">WhatsApp<input type="text" value={whatsappPhone} onChange={(event) => setWhatsappPhone(event.target.value)} placeholder="(00) 00000-0000" required /></label>
           <label className="login-label">Senha<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} required /></label>
           <label className="login-label">Confirmar senha<input type="password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} required /></label>
           <small className="login-foot"><ShieldCheck size={13} /> {passwordHint}</small>
@@ -845,11 +899,11 @@ function ResetPasswordScreen({ token, onDone }: { token: string; onDone: () => v
 }
 
 function PageHeader({ eyebrow, title, subtitle, action }: { eyebrow: string; title: string; subtitle: string; action?: ReactNode }) { return <div className="page-heading"><div><p className="eyebrow">{eyebrow}</p><h1>{title}</h1><p className="subheading">{subtitle}</p></div>{action}</div> }
-function SellerRequestsView({ requests, onNew }: { requests: Request[]; onNew: () => void }) {
+function SellerRequestsView({ requests, onNew, onEdit }: { requests: Request[]; onNew: () => void; onEdit: (item: Request) => void }) {
   const [detail, setDetail] = useState<Request | null>(null)
   return <><PageHeader eyebrow="ÁREA DO VENDEDOR" title="Minhas solicitações" subtitle="Acompanhe o andamento dos clientes enviados. Clique em um cliente para ver o processo e o resultado." action={<button className="primary-btn" onClick={onNew}><Plus size={18} /> Nova ficha cadastral</button>} />
-    <div className="seller-list">{requests.length ? requests.map((item) => <button type="button" className="seller-request" key={item.id} onClick={() => setDetail(item)} style={{ width: '100%', textAlign: 'left', font: 'inherit', cursor: 'pointer' }}><div className="case-avatar blue">{item.companyName.slice(0, 2)}</div><div><strong>{item.companyName}</strong><small>Código Prático: {item.clientCode} · {item.cnpj} · {item.protocol}</small></div><span className={'status ' + (item.status === 'APROVADA' ? 'green' : item.status === 'NEGADA' ? 'red' : 'blue')}><i></i>{statusLabel[item.status]}</span></button>) : <p className="subheading">Nenhuma solicitação enviada ainda.</p>}</div>
-    {detail && <SellerRequestDetailModal request={detail} onClose={() => setDetail(null)} />}
+    <div className="seller-list">{requests.length ? requests.map((item) => <button type="button" className="seller-request" key={item.id} onClick={() => setDetail(item)} style={{ width: '100%', textAlign: 'left', font: 'inherit', cursor: 'pointer' }}><div className="case-avatar blue">{item.companyName.slice(0, 2)}</div><div><strong>{item.companyName}</strong><small>Código Prático: {item.clientCode} · {item.cnpj} · {item.protocol}</small></div><span className={'status ' + (item.status === 'APROVADA' ? 'green' : item.status === 'NEGADA' || item.status === 'DEVOLVIDA' ? 'red' : 'blue')}><i></i>{statusLabel[item.status]}</span></button>) : <p className="subheading">Nenhuma solicitação enviada ainda.</p>}</div>
+    {detail && <SellerRequestDetailModal request={detail} onClose={() => setDetail(null)} onEdit={onEdit} />}
   </>
 }
 
@@ -859,12 +913,13 @@ const sellerProcessSteps = [
   { key: 'AGUARDANDO_GESTAO', label: 'Aguardando gestão' },
   { key: 'DECISAO', label: 'Decisão' },
 ]
-const sellerStepIndex: Record<Status, number> = { RECEBIDA: 0, EM_ANALISE: 1, AGUARDANDO_GESTAO: 2, APROVADA: 3, NEGADA: 3 }
+const sellerStepIndex: Record<Status, number> = { RECEBIDA: 0, EM_ANALISE: 1, AGUARDANDO_GESTAO: 2, APROVADA: 3, NEGADA: 3, DEVOLVIDA: 0 }
 
-function SellerRequestDetailModal({ request, onClose }: { request: Request; onClose: () => void }) {
+function SellerRequestDetailModal({ request, onClose, onEdit }: { request: Request; onClose: () => void; onEdit: (item: Request) => void }) {
   const [decisionDetail, setDecisionDetail] = useState<DecisionDetail | null>(null)
   const [loading, setLoading] = useState(false)
   const isDecided = request.status === 'APROVADA' || request.status === 'NEGADA'
+  const isReturned = request.status === 'DEVOLVIDA'
   useEffect(() => {
     if (!isDecided) { setDecisionDetail(null); return }
     setLoading(true)
@@ -876,9 +931,9 @@ function SellerRequestDetailModal({ request, onClose }: { request: Request; onCl
     <div className="modal-head"><div><p className="eyebrow">SOLICITAÇÃO {request.protocol}</p><h2>{request.companyName}</h2></div><button type="button" onClick={onClose}><X size={19} /></button></div>
     <p className="modal-copy">Código Prático: {request.clientCode} · {request.cnpj}</p>
     <div className="request-steps">{sellerProcessSteps.map((step, index) => {
-      const isDanger = index === 3 && request.status === 'NEGADA'
+      const isDanger = (index === 3 && request.status === 'NEGADA') || (index === 0 && isReturned)
       const stateClass = index < stepIndex ? 'done' : index === stepIndex ? `active${isDanger ? ' danger' : ''}` : ''
-      return <div className={`request-step ${stateClass}`} key={step.key}><span className="request-step-dot">{index < stepIndex ? <Check size={12} /> : index + 1}</span><span>{index === 3 && isDecided ? statusLabel[request.status] : step.label}</span></div>
+      return <div className={`request-step ${stateClass}`} key={step.key}><span className="request-step-dot">{index < stepIndex ? <Check size={12} /> : index + 1}</span><span>{index === 3 && isDecided ? statusLabel[request.status] : index === 0 && isReturned ? statusLabel[request.status] : step.label}</span></div>
     })}</div>
     {isDecided ? (
       loading ? <p className="modal-copy">Carregando...</p> : decisionDetail ? <>
@@ -890,22 +945,36 @@ function SellerRequestDetailModal({ request, onClose }: { request: Request; onCl
         <p className="modal-copy">{decisionDetail.clientMessage || (decisionDetail.decision === 'APROVADA' ? 'Crédito aprovado pela gestão.' : 'Fale com a gestão para mais detalhes sobre a negativa.')}</p>
         <div className="check-line"><ShieldCheck size={16} /><div><strong>{decisionDetail.managerName}</strong><small>Decidido em {formatDateTime(decisionDetail.decidedAt)}</small></div></div>
       </> : <p className="modal-copy">Decisão registrada, mas os detalhes não estão disponíveis no momento.</p>
-    ) : <p className="modal-copy">Sua solicitação está em andamento. Assim que a gestão decidir, o resultado e a justificativa aparecerão aqui.</p>}
+    ) : isReturned ? <>
+      <div className="notice notice-error"><X size={17} /> A analista devolveu este cadastro para ajustes.</div>
+      <div className="form-section-title">Motivo da devolução</div>
+      <p className="modal-copy">{request.returnReason || '—'}</p>
+      <button type="button" className="primary-btn full" onClick={() => onEdit(request)}><Pencil size={16} /> Editar e reenviar</button>
+    </> : <p className="modal-copy">Sua solicitação está em andamento. Assim que a gestão decidir, o resultado e a justificativa aparecerão aqui.</p>}
     <div className="modal-actions"><button type="button" className="cancel-btn" onClick={onClose}>Fechar</button></div>
   </div></div>
 }
-function SellerForm({ onSubmit }: { onSubmit: (form: HTMLFormElement, contractFile: File | null) => Promise<string | null> }) {
-  const [cnpj, setCnpj] = useState('')
+const splitMultiple = (value: string | null): string[] => {
+  const parts = (value || '').split(';').map((part) => part.trim()).filter(Boolean)
+  return parts.length ? parts : ['']
+}
+
+function SellerForm({ onSubmit, initialRequest }: { onSubmit: (form: HTMLFormElement, contractFile: File | null) => Promise<string | null>; initialRequest?: Request | null }) {
+  const isEditing = !!initialRequest
+  const initialNames = splitMultiple(initialRequest?.contactName ?? null)
+  const initialPhones = splitMultiple(initialRequest?.phone ?? null)
+  const initialEmails = splitMultiple(initialRequest?.contactEmail ?? null)
+  const [cnpj, setCnpj] = useState(() => (initialRequest ? formatCnpj(initialRequest.cnpj) : ''))
   const [lookupLoading, setLookupLoading] = useState(false)
   const [lookupError, setLookupError] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState('')
-  const [deliveryLocation, setDeliveryLocation] = useState('Endereço da empresa')
+  const [deliveryLocation, setDeliveryLocation] = useState(initialRequest?.deliveryLocation === 'Outro endereço' ? 'Outro endereço' : 'Endereço da empresa')
   const [contractFile, setContractFile] = useState<File | null>(null)
-  const [nameIds, setNameIds] = useState([0])
-  const [phoneIds, setPhoneIds] = useState([0])
-  const [emailIds, setEmailIds] = useState([0])
-  const nextFieldId = useRef(1)
+  const [nameIds, setNameIds] = useState(() => initialNames.map((_, index) => index))
+  const [phoneIds, setPhoneIds] = useState(() => initialPhones.map((_, index) => index))
+  const [emailIds, setEmailIds] = useState(() => initialEmails.map((_, index) => index))
+  const nextFieldId = useRef(Math.max(initialNames.length, initialPhones.length, initialEmails.length, 1))
   const addNameField = () => setNameIds((ids) => [...ids, nextFieldId.current++])
   const removeNameField = (id: number) => setNameIds((ids) => ids.filter((x) => x !== id))
   const addPhoneField = () => setPhoneIds((ids) => [...ids, nextFieldId.current++])
@@ -940,99 +1009,103 @@ function SellerForm({ onSubmit }: { onSubmit: (form: HTMLFormElement, contractFi
 
   const resetForm = (form: HTMLFormElement) => {
     form.reset()
-    setCnpj(''); setContractFile(null); setDeliveryLocation('Endereço da empresa')
-    setNameIds([0]); setPhoneIds([0]); setEmailIds([0])
+    setCnpj(initialRequest ? formatCnpj(initialRequest.cnpj) : ''); setContractFile(null)
+    setDeliveryLocation(initialRequest?.deliveryLocation === 'Outro endereço' ? 'Outro endereço' : 'Endereço da empresa')
+    setNameIds(initialNames.map((_, index) => index)); setPhoneIds(initialPhones.map((_, index) => index)); setEmailIds(initialEmails.map((_, index) => index))
   }
 
   const submit = async (form: HTMLFormElement) => {
-    if (!contractFile) { setSubmitError('Anexe o contrato social ou certificado de empresário individual (PDF).'); return }
+    if (!contractFile && !isEditing) { setSubmitError('Anexe o contrato social ou certificado de empresário individual (PDF).'); return }
     setSubmitting(true); setSubmitError('')
     const error = await onSubmit(form, contractFile)
-    if (error) setSubmitError(error); else resetForm(form)
+    if (error) setSubmitError(error); else if (!isEditing) resetForm(form)
     setSubmitting(false)
   }
 
   return <form className="form-page" ref={formRef} onSubmit={(event) => { event.preventDefault(); submit(event.currentTarget) }}>
-    <PageHeader eyebrow="FICHA CADASTRAL DIGITAL" title="Novo cadastro de cliente" subtitle="Para atender sua solicitação com rapidez e sem erros, preencha todos os campos abaixo." />
+    <PageHeader eyebrow="FICHA CADASTRAL DIGITAL" title={isEditing ? 'Corrigir e reenviar cadastro' : 'Novo cadastro de cliente'} subtitle={isEditing ? 'Ajuste as informações apontadas pela analista e reenvie para uma nova triagem.' : 'Para atender sua solicitação com rapidez e sem erros, preencha todos os campos abaixo.'} />
+    {isEditing && initialRequest?.returnReason && <div className="notice notice-error"><X size={17} /> Motivo da devolução: {initialRequest.returnReason}</div>}
 
     <div className="form-section">
       <div className="form-section-head"><div className="form-section-icon"><Building2 size={16} /></div><div><h3>Identificação da empresa</h3><p>Dados cadastrais e localização do cliente</p></div></div>
-      <label>Código do cadastro (Prático)<span className="required-mark">*</span><input name="clientCode" required placeholder="Ex.: Cliente 258912" /></label>
+      <label>Código do cadastro (Prático)<span className="required-mark">*</span><input name="clientCode" required placeholder="Ex.: Cliente 258912" defaultValue={initialRequest?.clientCode ?? ''} /></label>
       <div className="form-grid">
         <label>CNPJ<span className="required-mark">*</span><input name="cnpj" required placeholder="00.000.000/0000-00" maxLength={18} value={cnpj} onChange={(event) => setCnpj(formatCnpj(event.target.value))} /></label>
         <label style={{ alignSelf: 'end' }}><button type="button" className="outline-btn" style={{ marginTop: 6 }} onClick={fillFromCnpj} disabled={lookupLoading}><Search size={15} /> {lookupLoading ? 'Consultando CNPJ...' : 'Preencher informações'}</button></label>
       </div>
       {lookupError && <div className="notice notice-error"><X size={17} /> {lookupError}</div>}
-      <label>Razão social<span className="required-mark">*</span><input name="companyName" required placeholder="Ex.: Nome da Empresa Ltda" ref={companyNameRef} /></label>
+      <label>Razão social<span className="required-mark">*</span><input name="companyName" required placeholder="Ex.: Nome da Empresa Ltda" ref={companyNameRef} defaultValue={initialRequest?.companyName ?? ''} /></label>
       <div className="form-grid">
-        <label>Nome fantasia<input name="tradeName" placeholder="Nome comercial" ref={tradeNameRef} /></label>
-        <label>Inscrição estadual<input name="stateRegistration" placeholder="Número da IE" /></label>
+        <label>Nome fantasia<input name="tradeName" placeholder="Nome comercial" ref={tradeNameRef} defaultValue={initialRequest?.tradeName ?? ''} /></label>
+        <label>Inscrição estadual<input name="stateRegistration" placeholder="Número da IE" defaultValue={initialRequest?.stateRegistration ?? ''} /></label>
       </div>
-      <label>Endereço completo<input name="address" placeholder="Rua, número, bairro, cidade e UF" ref={addressRef} /></label>
+      <label>Endereço completo<input name="address" placeholder="Rua, número, bairro, cidade e UF" ref={addressRef} defaultValue={initialRequest?.address ?? ''} /></label>
     </div>
 
     <div className="form-section">
       <div className="form-section-head"><div className="form-section-icon"><MessageSquareText size={16} /></div><div><h3>O que você precisa?</h3><p>Explique o motivo da solicitação</p></div></div>
-      <label>Explique com clareza o que você deseja<span className="required-mark">*</span><textarea name="requestPurpose" required rows={2} placeholder="Ex.: aprovação para faturamento, atualização de limite, novo cadastro..."></textarea></label>
+      <label>Explique com clareza o que você deseja<span className="required-mark">*</span><textarea name="requestPurpose" required rows={2} placeholder="Ex.: aprovação para faturamento, atualização de limite, novo cadastro..." defaultValue={initialRequest?.requestPurpose ?? ''}></textarea></label>
     </div>
 
     <div className="form-section">
       <div className="form-section-head"><div className="form-section-icon"><Phone size={16} /></div><div><h3>Contato do cliente ou responsável</h3><p>Quem vamos procurar para confirmar os dados</p></div></div>
       <div className="field-label-row"><span className="field-label">Nome do contato<span className="required-mark">*</span></span><button type="button" className="add-field-btn" onClick={addNameField}><Plus size={14} /></button></div>
       {nameIds.map((id, index) => <div className="dynamic-field-row" key={id}>
-        <input name="contactName" required={index === 0} placeholder="Nome do responsável" />
+        <input name="contactName" required={index === 0} placeholder="Nome do responsável" defaultValue={initialNames[index] ?? ''} />
         {nameIds.length > 1 && <button type="button" className="remove-field-btn" onClick={() => removeNameField(id)}><X size={14} /></button>}
       </div>)}
       <div className="field-label-row" style={{ marginTop: 12 }}><span className="field-label">Telefone<span className="required-mark">*</span></span><button type="button" className="add-field-btn" onClick={addPhoneField}><Plus size={14} /></button></div>
       {phoneIds.map((id, index) => <div className="dynamic-field-row" key={id}>
-        <input name="phone" required={index === 0} placeholder="(00) 0000-0000" ref={index === 0 ? phoneRef : undefined} />
+        <input name="phone" required={index === 0} placeholder="(00) 0000-0000" ref={index === 0 ? phoneRef : undefined} defaultValue={initialPhones[index] ?? ''} />
         {phoneIds.length > 1 && <button type="button" className="remove-field-btn" onClick={() => removePhoneField(id)}><X size={14} /></button>}
       </div>)}
       <div className="field-label-row" style={{ marginTop: 12 }}><span className="field-label">E-mail de contato<span className="required-mark">*</span></span><button type="button" className="add-field-btn" onClick={addEmailField}><Plus size={14} /></button></div>
       {emailIds.map((id, index) => <div className="dynamic-field-row" key={id}>
-        <input name="contactEmail" type="email" required={index === 0} placeholder="responsavel@cliente.com.br" />
+        <input name="contactEmail" type="email" required={index === 0} placeholder="responsavel@cliente.com.br" defaultValue={initialEmails[index] ?? ''} />
         {emailIds.length > 1 && <button type="button" className="remove-field-btn" onClick={() => removeEmailField(id)}><X size={14} /></button>}
       </div>)}
       <div className="form-grid" style={{ marginTop: 12 }}>
-        <label>E-mail para NFe e avisos de vencimento<span className="required-mark">*</span><input name="invoiceEmail" type="email" required placeholder="financeiro@cliente.com.br" /></label>
-        <label>E-mail financeiro<input name="financeEmail" type="email" placeholder="contas@cliente.com.br" /></label>
+        <label>E-mail para NFe e avisos de vencimento<span className="required-mark">*</span><input name="invoiceEmail" type="email" required placeholder="financeiro@cliente.com.br" defaultValue={initialRequest?.invoiceEmail ?? ''} /></label>
+        <label>E-mail financeiro<input name="financeEmail" type="email" placeholder="contas@cliente.com.br" defaultValue={initialRequest?.financeEmail ?? ''} /></label>
       </div>
     </div>
 
     <div className="form-section">
       <div className="form-section-head"><div className="form-section-icon"><ClipboardList size={16} /></div><div><h3>Perguntas obrigatórias</h3><p>Ajudam a analista a validar a operação</p></div></div>
-      <label>Como o cliente chegou até você?<span className="required-mark">*</span><select name="origin" required defaultValue="Prospecção"><option>Prospecção</option><option>Indicação</option><option>Visita de vendedor externo</option><option>Cliente já conhecido</option></select></label>
+      <label>Como o cliente chegou até você?<span className="required-mark">*</span><select name="origin" required defaultValue={initialRequest?.origin ?? 'Prospecção'}><option>Prospecção</option><option>Indicação</option><option>Visita de vendedor externo</option><option>Cliente já conhecido</option></select></label>
       <div className="form-grid">
-        <label>Forma de autorização de compra?<span className="required-mark">*</span><select name="purchaseAuthorization" required defaultValue="E-mail formal"><option>E-mail formal</option><option>Ligação telefônica</option><option>WhatsApp</option><option>Pedido de compra assinado</option><option>Outro</option></select></label>
-        <label>Tipo de entrega?<span className="required-mark">*</span><select name="deliveryType" required defaultValue="Transportadora"><option>Transportadora</option><option>Retirada no local</option><option>Entrega própria</option><option>Outro</option></select></label>
+        <label>Forma de autorização de compra?<span className="required-mark">*</span><select name="purchaseAuthorization" required defaultValue={initialRequest?.purchaseAuthorization ?? 'E-mail formal'}><option>E-mail formal</option><option>Ligação telefônica</option><option>WhatsApp</option><option>Pedido de compra assinado</option><option>Outro</option></select></label>
+        <label>Tipo de entrega?<span className="required-mark">*</span><select name="deliveryType" required defaultValue={initialRequest?.deliveryType ?? 'Transportadora'}><option>Transportadora</option><option>Retirada no local</option><option>Entrega própria</option><option>Outro</option></select></label>
       </div>
       <label>Local da entrega (empresa ou outro)?<span className="required-mark">*</span><select name="deliveryLocation" required value={deliveryLocation} onChange={(event) => setDeliveryLocation(event.target.value)}><option>Endereço da empresa</option><option>Outro endereço</option></select></label>
-      {deliveryLocation === 'Outro endereço' && <label>Endereço de entrega<span className="required-mark">*</span><input name="deliveryAddress" required placeholder="Rua, número, bairro, cidade e UF" /></label>}
+      {deliveryLocation === 'Outro endereço' && <label>Endereço de entrega<span className="required-mark">*</span><input name="deliveryAddress" required placeholder="Rua, número, bairro, cidade e UF" defaultValue={initialRequest?.deliveryAddress ?? ''} /></label>}
     </div>
 
     <div className="form-section">
       <div className="form-section-head"><div className="form-section-icon"><Paperclip size={16} /></div><div><h3>Documentos e observações</h3><p>Contrato social e informações finais</p></div></div>
       <button type="button" className={contractFile ? 'upload-dropzone filled' : 'upload-dropzone'} onClick={() => contractInputRef.current?.click()} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); const file = event.dataTransfer.files?.[0]; if (file) setContractFile(file) }}>
         <div className="upload-dropzone-icon">{contractFile ? <FileCheck2 size={18} /> : <UploadCloud size={18} />}</div>
-        <div><strong>{contractFile ? contractFile.name : <>Anexar contrato social ou certificado de empresário individual<span className="required-mark">*</span></>}</strong><small>{contractFile ? 'Clique para trocar o arquivo' : 'Clique aqui ou arraste o PDF'}</small></div>
+        <div><strong>{contractFile ? contractFile.name : isEditing ? 'Trocar contrato social ou certificado de empresário individual (opcional)' : <>Anexar contrato social ou certificado de empresário individual<span className="required-mark">*</span></>}</strong><small>{contractFile ? 'Clique para trocar o arquivo' : isEditing ? 'Só anexe se precisar substituir o arquivo já enviado' : 'Clique aqui ou arraste o PDF'}</small></div>
       </button>
       <input ref={contractInputRef} type="file" accept="application/pdf" style={{ display: 'none' }} onChange={(event) => setContractFile(event.target.files?.[0] || null)} />
-      <label style={{ marginTop: 14 }}>Observações do vendedor<textarea name="sellerNotes" rows={3} placeholder="Contato negociado, responsáveis e outras informações relevantes"></textarea></label>
+      <label style={{ marginTop: 14 }}>Observações do vendedor<textarea name="sellerNotes" rows={3} placeholder="Contato negociado, responsáveis e outras informações relevantes" defaultValue={initialRequest?.sellerNotes ?? ''}></textarea></label>
     </div>
 
     {submitError && <div className="notice notice-error"><X size={17} /> {submitError}</div>}
-    <div className="form-page-actions"><button type="button" className="cancel-btn" onClick={() => formRef.current && resetForm(formRef.current)}>Limpar formulário</button><button type="submit" className="primary-btn" disabled={submitting}><Send size={17} /> {submitting ? 'Enviando...' : 'Enviar para análise'}</button></div>
+    <div className="form-page-actions"><button type="button" className="cancel-btn" onClick={() => formRef.current && resetForm(formRef.current)}>Limpar formulário</button><button type="submit" className="primary-btn" disabled={submitting}><Send size={17} /> {submitting ? (isEditing ? 'Reenviando...' : 'Enviando...') : isEditing ? 'Reenviar para análise' : 'Enviar para análise'}</button></div>
   </form>
 }
 type DecisionDetail = { protocol: string; companyName: string; decision: 'APROVADA' | 'NEGADA'; approvedLimit: number | null; internalReason: string | null; clientMessage: string | null; decidedAt: string; managerName: string }
 const formatDateTime = (iso: string) => new Date(iso).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })
 
-function AnalystView({ requests, selected, setSelected, onSend }: { requests: Request[]; selected: Request; setSelected: (item: Request) => void; onSend: () => void }) {
+function AnalystView({ requests, selected, setSelected, onSend, onReturned }: { requests: Request[]; selected: Request; setSelected: (item: Request) => void; onSend: () => void; onReturned: () => void }) {
   const serasaInputRef = useRef<HTMLInputElement>(null)
   const depsInputRef = useRef<HTMLInputElement>(null)
   const [requestDocuments, setRequestDocuments] = useState<DossierDocument[]>([])
   const [uploadingType, setUploadingType] = useState<string | null>(null)
   const [uploadError, setUploadError] = useState('')
+  const [showReturnModal, setShowReturnModal] = useState(false)
+  const pushToast = useToast()
   useEffect(() => { if (selected.id) listDocuments(selected.id).then(setRequestDocuments); else setRequestDocuments([]) }, [selected.id])
   const contractDoc = requestDocuments.find((d) => d.documentType === 'CONTRATO_SOCIAL')
   const serasaDoc = requestDocuments.find((d) => d.documentType === 'SERASA')
@@ -1059,7 +1132,7 @@ function AnalystView({ requests, selected, setSelected, onSend }: { requests: Re
   }
   const bothUploaded = !!serasaDoc && !!depsDoc
 
-  return <><PageHeader eyebrow="ÁREA DA ANALISTA" title="Triagem e montagem do dossiê" subtitle="Receba os cadastros, anexe os relatórios e envie uma análise completa para a gestão." /><div className="analyst-layout"><div className="queue-card"><div className="queue-header"><div><h2>Fila de solicitações</h2><p>{requests.length} cadastro(s) aguardando tratamento</p></div><div className="search"><Search size={16} /><input placeholder="Buscar cliente" /></div></div>{requests.length ? requests.map((item) => <button className={selected.id === item.id ? 'queue-item selected' : 'queue-item'} key={item.id} onClick={() => setSelected(item)}><div className="case-avatar blue">{item.companyName.slice(0, 2)}</div><div><strong>{item.companyName}</strong><small>{item.cnpj}</small></div><span className="queue-time">{statusLabel[item.status]}</span></button>) : <p className="subheading" style={{ padding: '17px' }}>Nenhum cadastro na fila.</p>}</div><div className="dossier-panel">{!selected.id ? <div style={{ padding: '60px 30px', textAlign: 'center' }}><FileCheck2 size={34} style={{ color: '#b8cdfb', marginBottom: 14 }} /><p className="subheading">Selecione um cliente na fila ao lado para ver os dados do cadastro.</p></div> : <><div className="dossier-head"><div><p className="eyebrow">DOSSIÊ {selected.protocol}</p><h2>{selected.companyName}</h2><span>Código Prático: {selected.clientCode} · {selected.cnpj} · solicitado por {selected.sellerName}</span></div><span className="status blue"><i></i>{statusLabel[selected.status]}</span></div><p className="eyebrow">IDENTIFICAÇÃO DA EMPRESA</p><div className="data-grid"><div><span>Código do cadastro (Prático)</span><strong>{selected.clientCode || '—'}</strong></div><div><span>CNPJ</span><strong>{selected.cnpj || '—'}</strong></div><div><span>Razão social</span><strong>{selected.companyName || '—'}</strong></div><div><span>Nome fantasia</span><strong>{selected.tradeName || '—'}</strong></div><div><span>Inscrição estadual</span><strong>{selected.stateRegistration || '—'}</strong></div><div><span>Endereço completo</span><strong>{selected.address || '—'}</strong></div></div>
+  return <><PageHeader eyebrow="ÁREA DA ANALISTA" title="Triagem e montagem do dossiê" subtitle="Receba os cadastros, anexe os relatórios e envie uma análise completa para a gestão." /><div className="analyst-layout"><div className="queue-card"><div className="queue-header"><div><h2>Fila de solicitações</h2><p>{requests.length} cadastro(s) aguardando tratamento</p></div><div className="search"><Search size={16} /><input placeholder="Buscar cliente" /></div></div>{requests.length ? requests.map((item) => <button className={selected.id === item.id ? 'queue-item selected' : 'queue-item'} key={item.id} onClick={() => setSelected(item)}><div className="case-avatar blue">{item.companyName.slice(0, 2)}</div><div><strong>{item.companyName}</strong><small>{item.cnpj}</small></div><span className="queue-time">{statusLabel[item.status]}</span></button>) : <p className="subheading" style={{ padding: '17px' }}>Nenhum cadastro na fila.</p>}</div><div className="dossier-panel">{!selected.id ? <div style={{ padding: '60px 30px', textAlign: 'center' }}><FileCheck2 size={34} style={{ color: '#b8cdfb', marginBottom: 14 }} /><p className="subheading">Selecione um cliente na fila ao lado para ver os dados do cadastro.</p></div> : <><div className="dossier-head"><div><p className="eyebrow">DOSSIÊ {selected.protocol}</p><h2>{selected.companyName}</h2><span>Código Prático: {selected.clientCode} · {selected.cnpj} · solicitado por {selected.sellerName}</span></div><div style={{ display: 'flex', alignItems: 'center', gap: 10 }}><button type="button" className="deny-btn" style={{ padding: '9px 14px' }} onClick={() => setShowReturnModal(true)}><X size={15} /> Recusar cadastro</button><span className="status blue"><i></i>{statusLabel[selected.status]}</span></div></div>{showReturnModal && <ReturnToSellerModal item={selected} onClose={() => setShowReturnModal(false)} onReturned={(emailSent) => { setShowReturnModal(false); onReturned(); pushToast('success', emailSent ? 'Cadastro devolvido ao vendedor. Ele foi avisado por e-mail.' : 'Cadastro devolvido ao vendedor.') }} />}<p className="eyebrow">DADOS DO VENDEDOR</p><div className="data-grid"><div><span>Nome</span><strong>{selected.sellerName || '—'}</strong></div><div><span>Código no Prático</span><strong>{selected.sellerCode || '—'}</strong></div><div><span>Loja</span><strong>{selected.sellerStore || '—'}</strong></div><div><span>Gerente responsável</span><strong>{selected.sellerManagerName || '—'}</strong></div><div><span>E-mail</span><strong>{selected.sellerEmail || '—'}</strong></div><div><span>WhatsApp</span><strong>{selected.sellerWhatsapp ? <a href={whatsappLink(selected.sellerWhatsapp)} target="_blank" rel="noreferrer">{selected.sellerWhatsapp}</a> : '—'}</strong></div></div><p className="eyebrow" style={{ marginTop: 18 }}>IDENTIFICAÇÃO DA EMPRESA</p><div className="data-grid"><div><span>Código do cadastro (Prático)</span><strong>{selected.clientCode || '—'}</strong></div><div><span>CNPJ</span><strong>{selected.cnpj || '—'}</strong></div><div><span>Razão social</span><strong>{selected.companyName || '—'}</strong></div><div><span>Nome fantasia</span><strong>{selected.tradeName || '—'}</strong></div><div><span>Inscrição estadual</span><strong>{selected.stateRegistration || '—'}</strong></div><div><span>Endereço completo</span><strong>{selected.address || '—'}</strong></div></div>
 <p className="eyebrow" style={{ marginTop: 18 }}>O QUE O VENDEDOR PRECISA</p><p className="modal-copy" style={{ margin: 0 }}>{selected.requestPurpose || '—'}</p>
 <p className="eyebrow" style={{ marginTop: 18 }}>CONTATO DO CLIENTE OU RESPONSÁVEL</p><div className="data-grid"><div><span>Nome do contato</span><strong>{selected.contactName || '—'}</strong></div><div><span>Telefone</span><strong>{selected.phone || '—'}</strong></div><div><span>E-mail de contato</span><strong>{selected.contactEmail || '—'}</strong></div><div><span>E-mail para NFe e avisos de vencimento</span><strong>{selected.invoiceEmail || '—'}</strong></div><div><span>E-mail financeiro</span><strong>{selected.financeEmail || '—'}</strong></div></div>
 <p className="eyebrow" style={{ marginTop: 18 }}>PERGUNTAS OBRIGATÓRIAS</p><div className="data-grid"><div><span>Como o cliente chegou até você?</span><strong>{selected.origin || '—'}</strong></div><div><span>Forma de autorização de compra?</span><strong>{selected.purchaseAuthorization || '—'}</strong></div><div><span>Tipo de entrega?</span><strong>{selected.deliveryType || '—'}</strong></div><div><span>Local da entrega</span><strong>{selected.deliveryLocation || '—'}</strong></div>{selected.deliveryAddress && <div><span>Endereço de entrega</span><strong>{selected.deliveryAddress}</strong></div>}</div>
@@ -1075,6 +1148,31 @@ function ReportFile({ icon, name, detail, complete, onClick, onRemove }: { icon:
       {onRemove && <button type="button" className="report-file-action danger" title="Remover PDF" onClick={onRemove}><Trash2 size={15} /></button>}
     </div>
   </div>
+}
+
+function ReturnToSellerModal({ item, onClose, onReturned }: { item: Request; onClose: () => void; onReturned: (emailSent: boolean) => void }) {
+  const [reason, setReason] = useState('')
+  const [error, setError] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const submit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (!reason.trim()) { setError('Informe a justificativa da devolução.'); return }
+    setSubmitting(true); setError('')
+    try {
+      const response = await apiFetch(`/api/credit-requests/${item.id}/return-to-seller`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reason }) })
+      const body = await response.json().catch(() => null)
+      if (!response.ok) { setError(body?.message || 'Não foi possível devolver o cadastro.'); return }
+      onReturned(!!body?.emailSent)
+    } catch { setError('Não foi possível conectar à API.')
+    } finally { setSubmitting(false) }
+  }
+  return <div className="modal-backdrop"><form className="modal" onSubmit={submit}>
+    <div className="modal-head"><div><p className="eyebrow">RECUSAR CADASTRO</p><h2>{item.companyName}</h2></div><button type="button" onClick={onClose}><X size={19} /></button></div>
+    <p className="modal-copy">O cadastro volta para o vendedor em "Minhas solicitações" com o motivo abaixo, para ele corrigir e reenviar.</p>
+    <label>Justificativa da devolução<textarea rows={4} value={reason} onChange={(event) => setReason(event.target.value)} required autoFocus placeholder="O que precisa ser corrigido ou completado no cadastro"></textarea></label>
+    {error && <div className="notice notice-error"><X size={17} /> {error}</div>}
+    <div className="modal-actions"><button type="button" className="cancel-btn" onClick={onClose}>Cancelar</button><button type="submit" className="deny-btn" style={{ padding: '11px 16px' }} disabled={submitting}><X size={17} /> {submitting ? 'Devolvendo...' : 'Devolver ao vendedor'}</button></div>
+  </form></div>
 }
 
 function DecisionsView({ pendingDecisions, historyDecisions, onConfirmPratico }: { pendingDecisions: Request[]; historyDecisions: Request[]; onConfirmPratico: (requestId: number) => Promise<void> }) {
@@ -1120,6 +1218,10 @@ function DecisionsView({ pendingDecisions, historyDecisions, onConfirmPratico }:
         <div><span>Inscrição estadual</span><strong>{selectedRequest.stateRegistration || '—'}</strong></div>
         <div><span>Endereço completo</span><strong>{selectedRequest.address || '—'}</strong></div>
         <div><span>Vendedor</span><strong>{selectedRequest.sellerName || '—'}</strong></div>
+        <div><span>Código do vendedor no Prático</span><strong>{selectedRequest.sellerCode || '—'}</strong></div>
+        <div><span>Loja do vendedor</span><strong>{selectedRequest.sellerStore || '—'}</strong></div>
+        <div><span>Gerente do vendedor</span><strong>{selectedRequest.sellerManagerName || '—'}</strong></div>
+        <div><span>WhatsApp do vendedor</span><strong>{selectedRequest.sellerWhatsapp ? <a href={whatsappLink(selectedRequest.sellerWhatsapp)} target="_blank" rel="noreferrer">{selectedRequest.sellerWhatsapp}</a> : '—'}</strong></div>
         <div><span>Contato</span><strong>{selectedRequest.contactName || '—'}</strong></div>
         <div><span>Telefone</span><strong>{selectedRequest.phone || '—'}</strong></div>
         <div><span>E-mail de contato</span><strong>{selectedRequest.contactEmail || '—'}</strong></div>
@@ -1143,34 +1245,100 @@ function DecisionsView({ pendingDecisions, historyDecisions, onConfirmPratico }:
     </div></div>}
   </>
 }
-function ManagementView({ requests, selected, setSelected, decision, onDecision }: { requests: Request[]; selected: Request; setSelected: (item: Request) => void; decision: 'APROVADA' | 'NEGADA' | null; onDecision: (status: Status, approvedLimit?: number, recipientEmail?: string, internalReason?: string, clientMessage?: string) => void }) {
+function ManagementView({ requests, deniedItems, onReloadRequests, selected, setSelected, decision, onDecision }: { requests: Request[]; deniedItems: Request[]; onReloadRequests: () => void; selected: Request; setSelected: (item: Request) => void; decision: 'APROVADA' | 'NEGADA' | null; onDecision: (status: Status, approvedLimit?: number, recipientEmail?: string, internalReason?: string, clientMessage?: string) => void }) {
+  const [subView, setSubView] = useState<'fila' | 'negadas'>('fila')
+  const pushToast = useToast()
   const [approvedLimit, setApprovedLimit] = useState(0)
   const [recipientEmail, setRecipientEmail] = useState(selected.sellerEmail)
   const [internalReason, setInternalReason] = useState('')
   const [clientMessage, setClientMessage] = useState('')
   const [requestDocuments, setRequestDocuments] = useState<DossierDocument[]>([])
+  const [decisionDetail, setDecisionDetail] = useState<DecisionDetail | null>(null)
+  const [reopenSubmitting, setReopenSubmitting] = useState(false)
+  const [reopenError, setReopenError] = useState('')
+  const [deniedSearch, setDeniedSearch] = useState('')
   const isQueued = requests.some((item) => item.id === selected.id)
+  const isDenied = deniedItems.some((item) => item.id === selected.id)
+  const deniedSearchQuery = deniedSearch.trim().toLowerCase()
+  const deniedSearchDigits = deniedSearchQuery.replace(/\D/g, '')
+  const filteredDeniedItems = !deniedSearchQuery ? deniedItems : deniedItems.filter((item) =>
+    item.companyName.toLowerCase().includes(deniedSearchQuery) ||
+    (item.tradeName ?? '').toLowerCase().includes(deniedSearchQuery) ||
+    (item.clientCode ?? '').toLowerCase().includes(deniedSearchQuery) ||
+    (deniedSearchDigits.length > 0 && item.cnpj.replace(/\D/g, '').includes(deniedSearchDigits)))
   useEffect(() => {
-    setRecipientEmail(selected.sellerEmail); setInternalReason(''); setClientMessage(''); setApprovedLimit(0)
-    if (isQueued) listDocuments(selected.id).then((docs) => { setRequestDocuments(docs); setApprovedLimit(docs.find((d) => d.documentType === 'DEPS')?.extractedData?.suggestedLimit ?? 0) })
+    setRecipientEmail(selected.sellerEmail); setInternalReason(''); setClientMessage(''); setReopenError('')
+    setApprovedLimit(isDenied ? (selected.approvedLimit ?? 0) : 0)
+    if (isQueued || isDenied) listDocuments(selected.id).then((docs) => { setRequestDocuments(docs); if (!isDenied) setApprovedLimit(docs.find((d) => d.documentType === 'DEPS')?.extractedData?.suggestedLimit ?? 0) })
     else setRequestDocuments([])
-  }, [selected.id, isQueued, selected.sellerEmail])
+  }, [selected.id, isQueued, isDenied, selected.sellerEmail, selected.approvedLimit])
+  useEffect(() => {
+    if (isDenied) apiFetch(`/api/credit-requests/${selected.id}/decision`).then((response) => (response.ok ? response.json() : null)).then(setDecisionDetail).catch(() => {})
+    else setDecisionDetail(null)
+  }, [selected.id, isDenied])
   const serasaDoc = requestDocuments.find((d) => d.documentType === 'SERASA')
   const depsDoc = requestDocuments.find((d) => d.documentType === 'DEPS')
   const deps = depsDoc?.extractedData ?? null
 
-  return <><PageHeader eyebrow="ÁREA DA GESTÃO" title="Decisão de crédito" subtitle="Selecione uma solicitação na fila para revisar o dossiê e registrar o parecer." action={isQueued ? <button className="back-btn" onClick={() => setSelected(emptyRequest)}><ArrowLeft size={16} /> Voltar para fila</button> : undefined} />
-    <div className="analyst-layout">
+  const submitReopen = async () => {
+    if (!approvedLimit || approvedLimit <= 0) { setReopenError('Informe o novo limite aprovado.'); return }
+    if (!internalReason.trim()) { setReopenError('Informe a justificativa da reabertura.'); return }
+    setReopenSubmitting(true); setReopenError('')
+    try {
+      const response = await apiFetch(`/api/credit-requests/${selected.id}/reopen`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ approvedLimit, internalReason, clientMessage: clientMessage || null, recipientEmail: recipientEmail || null }) })
+      const body = await response.json().catch(() => null)
+      if (!response.ok) { setReopenError(body?.message || 'Não foi possível reabrir a solicitação.'); return }
+      await onReloadRequests()
+      setSelected(emptyRequest)
+      pushToast('success', body?.emailSent ? 'Solicitação reaberta e aprovada. O vendedor foi avisado por e-mail.' : 'Solicitação reaberta e aprovada.')
+    } catch { setReopenError('Não foi possível conectar à API.')
+    } finally { setReopenSubmitting(false) }
+  }
+
+  return <><PageHeader eyebrow="ÁREA DA GESTÃO" title="Decisão de crédito" subtitle="Selecione uma solicitação na fila para revisar o dossiê e registrar o parecer." action={(isQueued || isDenied) ? <button className="back-btn" onClick={() => setSelected(emptyRequest)}><ArrowLeft size={16} /> Voltar para fila</button> : undefined} />
+    <div className="subtabs">
+      <button type="button" className={subView === 'fila' ? 'subtab active' : 'subtab'} onClick={() => { setSubView('fila'); setSelected(emptyRequest) }}>Fila de decisão{requests.length > 0 && <span className="subtab-count">{requests.length}</span>}</button>
+      <button type="button" className={subView === 'negadas' ? 'subtab active' : 'subtab'} onClick={() => { setSubView('negadas'); setSelected(emptyRequest) }}>Negadas{deniedItems.length > 0 && <span className="subtab-count">{deniedItems.length}</span>}</button>
+    </div>
+    {subView === 'negadas' ? <div className="analyst-layout">
+      <div className="queue-card">
+        <div className="queue-header">
+          <div><h2>Solicitações negadas</h2><p>{deniedItems.length} solicitação(ões) negada(s)</p></div>
+          <div className="search"><Search size={16} /><input placeholder="Buscar por nome, código Prático ou CNPJ" value={deniedSearch} onChange={(event) => setDeniedSearch(event.target.value)} /></div>
+        </div>
+        {filteredDeniedItems.length ? filteredDeniedItems.map((item) => <div className={isDenied && selected.id === item.id ? 'queue-item selected' : 'queue-item'} key={item.id} style={{ cursor: 'default', display: 'flex', flexDirection: 'column', gap: 10, width: '100%', boxSizing: 'border-box', overflow: 'hidden' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 9, minWidth: 0, width: '100%' }}>
+            <div className="case-avatar blue">{item.companyName.slice(0, 2)}</div>
+            <div style={{ minWidth: 0, flex: '1 1 0%', overflow: 'hidden' }}>
+              <strong style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={item.companyName}>{item.companyName}</strong>
+              <small style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={`Código Prático: ${item.clientCode || '—'} · ${item.cnpj}`}>Código Prático: {item.clientCode || '—'} · {item.cnpj}</small>
+            </div>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, width: '100%' }}>
+            <button type="button" className="small-action" style={{ width: '100%', boxSizing: 'border-box', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5, padding: '7px 10px', fontSize: 12, whiteSpace: 'nowrap' }} onClick={() => setSelected(item)}><Eye size={14} /> Ver dossiê</button>
+            <button type="button" className="primary-btn" style={{ width: '100%', boxSizing: 'border-box', justifyContent: 'center', padding: '7px 10px', fontSize: 12, boxShadow: 'none', whiteSpace: 'nowrap' }} onClick={() => setSelected(item)}><RotateCcw size={14} /> Reabrir</button>
+          </div>
+        </div>) : <p className="subheading" style={{ padding: '17px' }}>{deniedItems.length ? 'Nenhum resultado para essa busca.' : 'Nenhuma solicitação negada no momento.'}</p>}
+      </div>
+      <div className="dossier-panel">{!isDenied ? <div style={{ padding: '60px 30px', textAlign: 'center' }}><ShieldCheck size={34} style={{ color: '#b8cdfb', marginBottom: 14 }} /><p className="subheading">Selecione uma solicitação negada ao lado para ver o dossiê e reabrir a decisão.</p></div> : <>
+        <div className="dossier-head"><div><p className="eyebrow">SOLICITAÇÃO {selected.protocol}</p><h2>{selected.companyName}</h2><div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}><span className="user-role">Código Prático: {selected.clientCode}</span><span className="user-role">CNPJ: {selected.cnpj}</span></div></div></div>
+        {decisionDetail && <div className="notice notice-error" style={{ marginBottom: 4 }}><X size={17} /> Negada por {decisionDetail.managerName} em {formatDateTime(decisionDetail.decidedAt)}{decisionDetail.internalReason ? ` — motivo registrado: "${decisionDetail.internalReason}"` : ''}</div>}
+        <section className="review-card"><div className="card-heading"><div><h2>Dados do vendedor</h2><p>Para identificar quem fez a solicitação.</p></div></div><div className="data-grid" style={{ gridTemplateColumns: '1fr 1fr 1fr' }}><div><span>Nome</span><strong>{selected.sellerName || '—'}</strong></div><div><span>Código no Prático</span><strong>{selected.sellerCode || '—'}</strong></div><div><span>Loja</span><strong>{selected.sellerStore || '—'}</strong></div><div><span>Gerente responsável</span><strong>{selected.sellerManagerName || '—'}</strong></div><div><span>E-mail</span><strong>{selected.sellerEmail || '—'}</strong></div><div><span>WhatsApp</span><strong>{selected.sellerWhatsapp ? <a href={whatsappLink(selected.sellerWhatsapp)} target="_blank" rel="noreferrer">{selected.sellerWhatsapp}</a> : '—'}</strong></div></div></section>
+        <section className="review-card" style={{ marginTop: 16 }}><div className="card-heading"><div><h2>Resumo da análise</h2><p>Dados extraídos pela analista a partir do Serasa e DEPS.</p></div><span className="tag">Dossiê completo</span></div>{depsDoc && !deps && <div className="notice notice-error"><X size={17} /> Não foi possível extrair os dados automaticamente do PDF de Avaliação DEPS. Confira o arquivo original.</div>}<div className="score-row"><div className="score-main"><span>Classificação DEPS</span><strong>{deps?.classification ?? '—'}</strong><small>Limite sugerido: {deps ? money(deps.suggestedLimit) : '—'}</small></div><div className="score-item"><span>Pontuação positiva</span><strong className="success-text">{deps ? `${deps.positivePercent.toLocaleString('pt-BR')}%` : '—'}</strong></div><div className="score-item"><span>Pontuação negativa</span><strong className="danger-text">{deps ? `${deps.negativePercent.toLocaleString('pt-BR')}%` : '—'}</strong></div><div className="score-item"><span>Risco</span><strong className="danger-text">{deps?.risk ?? '—'}</strong></div></div><div className="risk-table"><div><span>Protestos</span><strong>{deps?.protests ? `${deps.protests.count} ocorrências · ${money(deps.protests.value)}` : '—'}</strong><b className="danger-text">Atenção</b></div><div><span>PEFIN</span><strong>{deps?.pefin ? `${deps.pefin.count} ocorrências · ${money(deps.pefin.value)}` : '—'}</strong><b className="warning-text">Verificar</b></div><div><span>Histórico de pagamento</span><strong>{deps?.paymentHistoryPercent != null ? `${deps.paymentHistoryPercent.toLocaleString('pt-BR')}% pontual` : '—'}</strong><b className="success-text">Regular</b></div><div><span>Consultas recentes</span><strong>{deps?.consultationsCount != null ? `${deps.consultationsCount} registrada(s)` : '—'}</strong><b>Normal</b></div></div><div className="original-files">{serasaDoc ? <span><FileText size={15} /> {serasaDoc.originalName} <a href="#" onClick={(event) => { event.preventDefault(); viewDocument(serasaDoc.id) }}>Visualizar</a></span> : <span><FileText size={15} /> Consulta Serasa <em style={{ color: '#b3bcc7', fontStyle: 'normal' }}>não anexada</em></span>}{depsDoc ? <span><FileText size={15} /> {depsDoc.originalName} <a href="#" onClick={(event) => { event.preventDefault(); viewDocument(depsDoc.id) }}>Visualizar</a></span> : <span><FileText size={15} /> Avaliação DEPS <em style={{ color: '#b3bcc7', fontStyle: 'normal' }}>não anexada</em></span>}</div></section>
+        <section className="decision-card" style={{ marginTop: 16 }}><p className="eyebrow">REABERTURA DA DECISÃO</p><h2>Novo limite e justificativa</h2><label>Novo limite aprovado<input type="number" min="0.01" step="0.01" value={approvedLimit} onChange={(event) => setApprovedLimit(Number(event.target.value))} /></label><label>Justificativa da reabertura<textarea rows={3} value={internalReason} onChange={(event) => setInternalReason(event.target.value)} placeholder="Motivo da gestão para reverter a negativa"></textarea></label><label>Mensagem para o vendedor<textarea rows={3} value={clientMessage} onChange={(event) => setClientMessage(event.target.value)} placeholder="Explicação que o vendedor verá em Minhas solicitações"></textarea></label><label>E-mail para envio do resultado<input type="email" value={recipientEmail} onChange={(event) => setRecipientEmail(event.target.value)} placeholder="email@empresa.com.br" /></label>{reopenError && <div className="notice notice-error"><X size={17} /> {reopenError}</div>}<div className="decision-buttons" style={{ gridTemplateColumns: '1fr' }}><button className="approve-btn" disabled={reopenSubmitting} onClick={submitReopen}><RotateCcw size={17} /> {reopenSubmitting ? 'Reabrindo...' : 'Reabrir e aprovar'}</button></div><small className="decision-note"><Bell size={13} /> A justificativa fica registrada no histórico da solicitação e um e-mail com o resultado será enviado ao endereço confirmado acima.</small></section>
+      </>}</div>
+    </div> : <div className="analyst-layout">
       <div className="queue-card">
         <div className="queue-header"><div><h2>Fila de decisão</h2><p>{requests.length} solicitação(ões) aguardando parecer</p></div></div>
         {requests.length ? requests.map((item) => <button className={isQueued && selected.id === item.id ? 'queue-item selected' : 'queue-item'} key={item.id} onClick={() => setSelected(item)}><div className="case-avatar blue">{item.companyName.slice(0, 2)}</div><div><strong>{item.companyName}</strong><small>Código Prático: {item.clientCode} · {item.cnpj}</small></div></button>) : <p className="subheading" style={{ padding: '17px' }}>Nenhuma solicitação aguardando decisão.</p>}
       </div>
       <div className="dossier-panel">{!isQueued ? <div style={{ padding: '60px 30px', textAlign: 'center' }}><ShieldCheck size={34} style={{ color: '#b8cdfb', marginBottom: 14 }} /><p className="subheading">Selecione uma solicitação na fila ao lado para revisar e decidir.</p></div> : <>
         <div className="dossier-head"><div><p className="eyebrow">SOLICITAÇÃO {selected.protocol}</p><h2>{selected.companyName}</h2><div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}><span className="user-role">Código Prático: {selected.clientCode}</span><span className="user-role">CNPJ: {selected.cnpj}</span></div></div></div>
-        <section className="review-card"><div className="card-heading"><div><h2>Resumo da análise</h2><p>Dados extraídos pela analista a partir do Serasa e DEPS.</p></div><span className="tag">Dossiê completo</span></div>{depsDoc && !deps && <div className="notice notice-error"><X size={17} /> Não foi possível extrair os dados automaticamente do PDF de Avaliação DEPS. Confira o arquivo original.</div>}<div className="score-row"><div className="score-main"><span>Classificação DEPS</span><strong>{deps?.classification ?? '—'}</strong><small>Limite sugerido: {deps ? money(deps.suggestedLimit) : '—'}</small></div><div className="score-item"><span>Pontuação positiva</span><strong className="success-text">{deps ? `${deps.positivePercent.toLocaleString('pt-BR')}%` : '—'}</strong></div><div className="score-item"><span>Pontuação negativa</span><strong className="danger-text">{deps ? `${deps.negativePercent.toLocaleString('pt-BR')}%` : '—'}</strong></div><div className="score-item"><span>Risco</span><strong className="danger-text">{deps?.risk ?? '—'}</strong></div></div><div className="risk-table"><div><span>Protestos</span><strong>{deps?.protests ? `${deps.protests.count} ocorrências · ${money(deps.protests.value)}` : '—'}</strong><b className="danger-text">Atenção</b></div><div><span>PEFIN</span><strong>{deps?.pefin ? `${deps.pefin.count} ocorrências · ${money(deps.pefin.value)}` : '—'}</strong><b className="warning-text">Verificar</b></div><div><span>Histórico de pagamento</span><strong>{deps?.paymentHistoryPercent != null ? `${deps.paymentHistoryPercent.toLocaleString('pt-BR')}% pontual` : '—'}</strong><b className="success-text">Regular</b></div><div><span>Consultas recentes</span><strong>{deps?.consultationsCount != null ? `${deps.consultationsCount} registrada(s)` : '—'}</strong><b>Normal</b></div></div><div className="original-files">{serasaDoc ? <span><FileText size={15} /> {serasaDoc.originalName} <a href="#" onClick={(event) => { event.preventDefault(); viewDocument(serasaDoc.id) }}>Visualizar</a></span> : <span><FileText size={15} /> Consulta Serasa <em style={{ color: '#b3bcc7', fontStyle: 'normal' }}>não anexada</em></span>}{depsDoc ? <span><FileText size={15} /> {depsDoc.originalName} <a href="#" onClick={(event) => { event.preventDefault(); viewDocument(depsDoc.id) }}>Visualizar</a></span> : <span><FileText size={15} /> Avaliação DEPS <em style={{ color: '#b3bcc7', fontStyle: 'normal' }}>não anexada</em></span>}</div></section>
+        <section className="review-card"><div className="card-heading"><div><h2>Dados do vendedor</h2><p>Para identificar quem fez a solicitação.</p></div></div><div className="data-grid" style={{ gridTemplateColumns: '1fr 1fr 1fr' }}><div><span>Nome</span><strong>{selected.sellerName || '—'}</strong></div><div><span>Código no Prático</span><strong>{selected.sellerCode || '—'}</strong></div><div><span>Loja</span><strong>{selected.sellerStore || '—'}</strong></div><div><span>Gerente responsável</span><strong>{selected.sellerManagerName || '—'}</strong></div><div><span>E-mail</span><strong>{selected.sellerEmail || '—'}</strong></div><div><span>WhatsApp</span><strong>{selected.sellerWhatsapp ? <a href={whatsappLink(selected.sellerWhatsapp)} target="_blank" rel="noreferrer">{selected.sellerWhatsapp}</a> : '—'}</strong></div></div></section>
+        <section className="review-card" style={{ marginTop: 16 }}><div className="card-heading"><div><h2>Resumo da análise</h2><p>Dados extraídos pela analista a partir do Serasa e DEPS.</p></div><span className="tag">Dossiê completo</span></div>{depsDoc && !deps && <div className="notice notice-error"><X size={17} /> Não foi possível extrair os dados automaticamente do PDF de Avaliação DEPS. Confira o arquivo original.</div>}<div className="score-row"><div className="score-main"><span>Classificação DEPS</span><strong>{deps?.classification ?? '—'}</strong><small>Limite sugerido: {deps ? money(deps.suggestedLimit) : '—'}</small></div><div className="score-item"><span>Pontuação positiva</span><strong className="success-text">{deps ? `${deps.positivePercent.toLocaleString('pt-BR')}%` : '—'}</strong></div><div className="score-item"><span>Pontuação negativa</span><strong className="danger-text">{deps ? `${deps.negativePercent.toLocaleString('pt-BR')}%` : '—'}</strong></div><div className="score-item"><span>Risco</span><strong className="danger-text">{deps?.risk ?? '—'}</strong></div></div><div className="risk-table"><div><span>Protestos</span><strong>{deps?.protests ? `${deps.protests.count} ocorrências · ${money(deps.protests.value)}` : '—'}</strong><b className="danger-text">Atenção</b></div><div><span>PEFIN</span><strong>{deps?.pefin ? `${deps.pefin.count} ocorrências · ${money(deps.pefin.value)}` : '—'}</strong><b className="warning-text">Verificar</b></div><div><span>Histórico de pagamento</span><strong>{deps?.paymentHistoryPercent != null ? `${deps.paymentHistoryPercent.toLocaleString('pt-BR')}% pontual` : '—'}</strong><b className="success-text">Regular</b></div><div><span>Consultas recentes</span><strong>{deps?.consultationsCount != null ? `${deps.consultationsCount} registrada(s)` : '—'}</strong><b>Normal</b></div></div><div className="original-files">{serasaDoc ? <span><FileText size={15} /> {serasaDoc.originalName} <a href="#" onClick={(event) => { event.preventDefault(); viewDocument(serasaDoc.id) }}>Visualizar</a></span> : <span><FileText size={15} /> Consulta Serasa <em style={{ color: '#b3bcc7', fontStyle: 'normal' }}>não anexada</em></span>}{depsDoc ? <span><FileText size={15} /> {depsDoc.originalName} <a href="#" onClick={(event) => { event.preventDefault(); viewDocument(depsDoc.id) }}>Visualizar</a></span> : <span><FileText size={15} /> Avaliação DEPS <em style={{ color: '#b3bcc7', fontStyle: 'normal' }}>não anexada</em></span>}</div></section>
         <section className="decision-card" style={{ marginTop: 16 }}><p className="eyebrow">PARECER FINAL</p><h2>Qual limite deve ser liberado?</h2><label>Limite aprovado<input type="number" min="0" step="0.01" value={approvedLimit} onChange={(event) => setApprovedLimit(Number(event.target.value))} /></label><label>Justificativa interna<textarea rows={3} value={internalReason} onChange={(event) => setInternalReason(event.target.value)} placeholder="Observações visíveis apenas para a gestão e analista"></textarea></label><label>Mensagem para o vendedor<textarea rows={3} value={clientMessage} onChange={(event) => setClientMessage(event.target.value)} placeholder="Explicação que o vendedor verá em Minhas solicitações"></textarea></label><label>E-mail para envio do resultado<input type="email" value={recipientEmail} onChange={(event) => setRecipientEmail(event.target.value)} placeholder="email@empresa.com.br" /></label><div className="decision-buttons"><button className={decision === 'NEGADA' ? 'deny-btn chosen' : 'deny-btn'} onClick={() => onDecision('NEGADA', undefined, recipientEmail, internalReason, clientMessage)}><X size={17} /> Negar crédito</button><button className={decision === 'APROVADA' ? 'approve-btn chosen' : 'approve-btn'} onClick={() => onDecision('APROVADA', approvedLimit, recipientEmail, internalReason, clientMessage)}><Check size={17} /> Aprovar crédito</button></div><small className="decision-note"><Bell size={13} /> Ao decidir, um e-mail com o resultado será enviado para o endereço confirmado acima.</small></section>
       </>}</div>
-    </div>
+    </div>}
   </>
 }
 

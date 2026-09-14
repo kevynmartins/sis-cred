@@ -2,8 +2,10 @@ import 'dotenv/config'
 import bcrypt from 'bcryptjs'
 import cors from 'cors'
 import { createHash, randomBytes } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+import path from 'node:path'
 import express, { type NextFunction, type Request, type Response } from 'express'
-import { rateLimit } from 'express-rate-limit'
+import { ipKeyGenerator, rateLimit } from 'express-rate-limit'
 import helmet from 'helmet'
 import jwt from 'jsonwebtoken'
 import mariadb from 'mariadb'
@@ -151,6 +153,60 @@ const mailer = process.env.SMTP_HOST
     })
   : null
 
+// Logo embutida como anexo inline (cid) em vez de referenciada por URL — assim ela aparece
+// corretamente no e-mail mesmo quando o cliente de e-mail bloqueia imagens externas, e
+// independe do domínio público estar acessível no momento do envio.
+const emailLogo = (() => {
+  try {
+    return readFileSync(path.join(process.cwd(), 'public', 'logo_sc.jpg'))
+  } catch {
+    return null
+  }
+})()
+const emailAttachments = emailLogo ? [{ filename: 'logo_sc.jpg', content: emailLogo, cid: 'siscred-logo' }] : []
+
+const escapeHtml = (value: string) =>
+  value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
+
+// Quebras de linha do texto original viram parágrafos no HTML, preservando o mesmo conteúdo
+// das versões em texto puro (mantidas como fallback em `text`) sem duplicar cada mensagem.
+const paragraphs = (text: string) =>
+  text.split('\n\n').map((block) => `<p style="margin:0 0 14px;font-size:14px;color:#3a4756;line-height:1.6;">${escapeHtml(block).replace(/\n/g, '<br/>')}</p>`).join('')
+
+// Caixa de destaque em laranja — usada nas mensagens de decisão para deixar claro que o
+// resultado ainda não está valendo no Prático, evitando que o vendedor informe o cliente cedo demais.
+const warningCallout = (text: string) =>
+  `<div style="margin:0 0 16px;padding:14px 16px;background:#fff6e5;border-left:4px solid #d98324;border-radius:6px;"><p style="margin:0;font-size:13px;color:#8a5300;font-weight:700;line-height:1.55;">⚠ ${escapeHtml(text)}</p></div>`
+
+const successCallout = (text: string) =>
+  `<div style="margin:0 0 16px;padding:14px 16px;background:#e9f8f2;border-left:4px solid #16966b;border-radius:6px;"><p style="margin:0;font-size:13px;color:#0f6b4c;font-weight:700;line-height:1.55;">✓ ${escapeHtml(text)}</p></div>`
+
+const emailLayout = ({ eyebrow, title, bodyHtml }: { eyebrow: string; title: string; bodyHtml: string }) => `<!DOCTYPE html>
+<html lang="pt-BR">
+  <head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /></head>
+  <body style="margin:0;padding:0;background:#f5f7fa;font-family:Arial,Helvetica,sans-serif;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f5f7fa;padding:32px 16px;">
+      <tr><td align="center">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:520px;background:#ffffff;border-radius:14px;overflow:hidden;box-shadow:0 2px 12px rgba(23,23,23,.08);">
+          <tr><td style="background:#171717;padding:22px 32px;">
+            ${emailLogo ? '<img src="cid:siscred-logo" alt="Sis-Cred" height="34" style="display:block;height:34px;width:auto;border:0;" />' : '<strong style="color:#fff;font-size:18px;font-family:Arial,Helvetica,sans-serif;">Sis-Cred</strong>'}
+          </td></tr>
+          <tr><td style="padding:30px 32px 8px;">
+            <p style="margin:0 0 6px;font-size:11px;font-weight:700;letter-spacing:1px;color:#d98324;text-transform:uppercase;">${escapeHtml(eyebrow)}</p>
+            <h1 style="margin:0 0 18px;font-size:20px;color:#171717;font-family:Arial,Helvetica,sans-serif;">${escapeHtml(title)}</h1>
+            ${bodyHtml}
+          </td></tr>
+          <tr><td style="padding:20px 32px 30px;">
+            <hr style="border:none;border-top:1px solid #e7ecf2;margin:0 0 18px;" />
+            <p style="margin:0;font-size:12px;color:#9aa6b4;">Este é um e-mail automático — não é necessário responder.</p>
+            <p style="margin:8px 0 0;font-size:13px;color:#415168;font-weight:700;">Sis-Cred Cadastro e Crédito</p>
+          </td></tr>
+        </table>
+      </td></tr>
+    </table>
+  </body>
+</html>`
+
 // Em produção a API roda atrás de um proxy reverso (Nginx/IIS); isso garante que o
 // limitador de tentativas identifique o IP real do cliente, e não o do proxy.
 if (process.env.TRUST_PROXY) app.set('trust proxy', process.env.TRUST_PROXY)
@@ -158,8 +214,20 @@ app.use(helmet())
 app.use(cors({ origin: process.env.CORS_ORIGIN || 'http://localhost:5173' }))
 app.use(express.json())
 
-const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 20, standardHeaders: true, legacyHeaders: false, message: { message: 'Muitas tentativas. Aguarde alguns minutos e tente novamente.' } })
-const strictAuthLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 8, standardHeaders: true, legacyHeaders: false, message: { message: 'Muitas tentativas. Aguarde alguns minutos e tente novamente.' } })
+// Limita por conta (e-mail, token de redefinição ou usuário autenticado) em vez de por IP:
+// várias pessoas costumam acessar de trás do mesmo IP (rede da empresa), então um limite por
+// IP faz uma senha errada de uma pessoa travar o login de todo mundo. Cai para o IP só quando
+// nenhuma dessas informações está disponível na requisição.
+const accountRateLimitKey = (request: Request) => {
+  const body = request.body as Record<string, unknown> | undefined
+  if (typeof body?.email === 'string' && body.email.trim()) return `email:${body.email.toLowerCase().trim()}`
+  if (typeof body?.token === 'string' && body.token.trim()) return `token:${body.token}`
+  const authUser = (request as AuthRequest).user
+  if (authUser?.id) return `user:${authUser.id}`
+  return ipKeyGenerator(request.ip || '')
+}
+const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 20, standardHeaders: true, legacyHeaders: false, keyGenerator: accountRateLimitKey, message: { message: 'Muitas tentativas. Aguarde alguns minutos e tente novamente.' } })
+const strictAuthLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 8, standardHeaders: true, legacyHeaders: false, keyGenerator: accountRateLimitKey, message: { message: 'Muitas tentativas. Aguarde alguns minutos e tente novamente.' } })
 const apiLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 600, standardHeaders: true, legacyHeaders: false, message: { message: 'Muitas requisições. Aguarde um momento e tente novamente.' } })
 app.use('/api', apiLimiter)
 
@@ -241,9 +309,13 @@ const validatePassword = (password: unknown): string | null => {
 }
 
 app.post('/api/auth/register', authLimiter, async (request, response) => {
-  const { name, email, password } = request.body
+  const { name, email, password, praticoSellerCode, storeName, managerName, whatsappPhone } = request.body
   if (!name || typeof name !== 'string' || !email || typeof email !== 'string' || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     response.status(400).json({ message: 'Informe nome e e-mail válidos.' })
+    return
+  }
+  if (!praticoSellerCode || !storeName || !managerName || !whatsappPhone) {
+    response.status(400).json({ message: 'Informe código no Prático, loja, gerente e WhatsApp.' })
     return
   }
   const passwordError = validatePassword(password)
@@ -254,8 +326,8 @@ app.post('/api/auth/register', authLimiter, async (request, response) => {
     const passwordHash = await bcrypt.hash(password, 12)
     const normalizedEmail = email.toLowerCase().trim()
     const result = await connection.query(
-      'INSERT INTO users (name, email, role, password_hash) VALUES (?, ?, ?, ?)',
-      [name.trim(), normalizedEmail, 'VENDEDOR', passwordHash],
+      'INSERT INTO users (name, email, role, pratico_seller_code, store_name, manager_name, whatsapp_phone, password_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [name.trim(), normalizedEmail, 'VENDEDOR', praticoSellerCode, storeName, managerName, whatsappPhone, passwordHash],
     )
     const authUser: AuthUser = { id: Number(result.insertId), name: name.trim(), email: normalizedEmail, role: 'VENDEDOR' }
     const token = jwt.sign(authUser, jwtSecret, { expiresIn: process.env.JWT_EXPIRES_IN || '8h' } as jwt.SignOptions)
@@ -316,6 +388,15 @@ app.post('/api/auth/forgot-password', authLimiter, async (request, response) => 
               to: normalizedEmail,
               subject: 'Redefinição de senha - Sis-Cred',
               text: `Olá, ${user.name}.\n\nRecebemos um pedido para redefinir sua senha no Sis-Cred.\nSe foi você, defina uma nova senha em até 30 minutos pelo link abaixo:\n${resetLink}\n\nSe não foi você, ignore este e-mail — sua senha continua a mesma.`,
+              html: emailLayout({
+                eyebrow: 'Segurança da conta',
+                title: 'Redefinição de senha',
+                bodyHtml: `<p style="margin:0 0 14px;font-size:14px;color:#3a4756;line-height:1.6;">Olá, ${escapeHtml(user.name)}.</p>
+                  <p style="margin:0 0 20px;font-size:14px;color:#3a4756;line-height:1.6;">Recebemos um pedido para redefinir sua senha no Sis-Cred. Se foi você, defina uma nova senha em até 30 minutos clicando no botão abaixo:</p>
+                  <p style="margin:0 0 22px;"><a href="${resetLink}" style="display:inline-block;background:#fbba00;color:#171717;font-weight:700;font-size:14px;padding:12px 24px;border-radius:8px;text-decoration:none;">Redefinir senha</a></p>
+                  <p style="margin:0;font-size:13px;color:#8190a1;line-height:1.55;">Se não foi você, ignore este e-mail — sua senha continua a mesma.</p>`,
+              }),
+              attachments: emailAttachments,
             })
           } catch (error) { console.error(error) }
         } else {
@@ -499,10 +580,11 @@ app.get('/api/credit-requests', async (request, response) => {
         r.invoice_email AS invoiceEmail, r.finance_email AS financeEmail, r.contact_name AS contactName, r.contact_email AS contactEmail,
         r.request_purpose AS requestPurpose, r.purchase_authorization AS purchaseAuthorization,
         r.delivery_type AS deliveryType, r.delivery_location AS deliveryLocation, r.delivery_address AS deliveryAddress,
-        r.requested_limit AS requestedLimit, r.approved_limit AS approvedLimit, r.origin, r.seller_notes AS sellerNotes,
+        r.requested_limit AS requestedLimit, r.approved_limit AS approvedLimit, r.origin, r.seller_notes AS sellerNotes, r.return_reason AS returnReason,
         r.status, r.submitted_at AS submittedAt,
         r.pratico_confirmed_at AS praticoConfirmedAt, pc.name AS praticoConfirmedByName,
-        u.name AS sellerName, u.email AS sellerEmail
+        u.name AS sellerName, u.email AS sellerEmail, u.pratico_seller_code AS sellerCode,
+        u.store_name AS sellerStore, u.manager_name AS sellerManagerName, u.whatsapp_phone AS sellerWhatsapp
        FROM credit_requests r
        INNER JOIN users u ON u.id = r.seller_id
        LEFT JOIN users pc ON pc.id = r.pratico_confirmed_by
@@ -580,7 +662,9 @@ app.get('/api/admin/users', authorize('ADMIN', 'GESTORA'), async (request, respo
     connection = await pool.getConnection()
     const roles = manageableRoles(authUser!.role)
     const rows = await connection.query(
-      `SELECT id, name, email, role, active, created_at AS createdAt FROM users WHERE role IN (${roles.map(() => '?').join(',')}) ORDER BY name`,
+      `SELECT id, name, email, role, pratico_seller_code AS praticoSellerCode, store_name AS storeName,
+        manager_name AS managerName, whatsapp_phone AS whatsappPhone, active, created_at AS createdAt
+       FROM users WHERE role IN (${roles.map(() => '?').join(',')}) ORDER BY name`,
       roles,
     )
     response.json(rows)
@@ -594,20 +678,28 @@ app.get('/api/admin/users', authorize('ADMIN', 'GESTORA'), async (request, respo
 
 app.post('/api/admin/users', authorize('ADMIN', 'GESTORA'), async (request, response) => {
   const authUser = (request as AuthRequest).user
-  const { name, email, role, password } = request.body
+  const { name, email, role, password, praticoSellerCode, storeName, managerName, whatsappPhone } = request.body
   const allowedRoles = manageableRoles(authUser!.role)
   if (!name || !email || !allowedRoles.includes(role)) {
     response.status(400).json({ message: 'Nome, e-mail e função são obrigatórios.' })
     return
   }
+  if (role === 'VENDEDOR' && (!praticoSellerCode || !storeName || !managerName || !whatsappPhone)) {
+    response.status(400).json({ message: 'Para vendedores, informe código no Prático, loja, gerente e WhatsApp.' })
+    return
+  }
   const passwordError = validatePassword(password)
   if (passwordError) { response.status(400).json({ message: passwordError }); return }
+  const sellerFields = role === 'VENDEDOR' ? [praticoSellerCode, storeName, managerName, whatsappPhone] : [null, null, null, null]
   let connection
   try {
     connection = await pool.getConnection()
     const passwordHash = await bcrypt.hash(password, 12)
-    const result = await connection.query('INSERT INTO users (name, email, role, password_hash) VALUES (?, ?, ?, ?)', [name, email, role, passwordHash])
-    response.status(201).json({ id: Number(result.insertId), name, email, role, active: 1 })
+    const result = await connection.query(
+      'INSERT INTO users (name, email, role, pratico_seller_code, store_name, manager_name, whatsapp_phone, password_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [name, email, role, ...sellerFields, passwordHash],
+    )
+    response.status(201).json({ id: Number(result.insertId), name, email, role, praticoSellerCode: sellerFields[0], storeName: sellerFields[1], managerName: sellerFields[2], whatsappPhone: sellerFields[3], active: 1 })
   } catch (error) {
     console.error(error)
     response.status(409).json({ message: 'Não foi possível criar o usuário. Verifique se o e-mail já existe.' })
@@ -722,6 +814,108 @@ app.patch('/api/credit-requests/:id/status', authorize('ANALISTA', 'ADMIN'), asy
     await connection?.rollback()
     console.error(error)
     response.status(500).json({ message: 'Não foi possível atualizar o status.' })
+  } finally {
+    connection?.release()
+  }
+})
+
+app.patch('/api/credit-requests/:id/return-to-seller', authorize('ANALISTA', 'ADMIN'), async (request, response) => {
+  const requestId = Number(request.params.id)
+  const authUser = (request as AuthRequest).user
+  const { reason } = request.body
+  if (!requestId || !reason || typeof reason !== 'string' || !reason.trim()) {
+    response.status(400).json({ message: 'Informe a justificativa da devolução.' })
+    return
+  }
+  let connection
+  try {
+    connection = await pool.getConnection()
+    const [requestRow] = await connection.query(
+      `SELECT r.protocol, r.company_name AS companyName, r.status, u.email AS sellerEmail
+       FROM credit_requests r INNER JOIN users u ON u.id = r.seller_id WHERE r.id = ?`,
+      [requestId],
+    )
+    if (!requestRow) { response.status(404).json({ message: 'Solicitação não encontrada.' }); return }
+    if (!['RECEBIDA', 'EM_ANALISE'].includes(requestRow.status)) {
+      response.status(400).json({ message: 'Só é possível devolver cadastros que ainda estão em triagem.' })
+      return
+    }
+    await connection.beginTransaction()
+    await connection.query('UPDATE credit_requests SET status = ?, return_reason = ? WHERE id = ?', ['DEVOLVIDA', reason.trim(), requestId])
+    await logAuditEvent(connection, requestId, authUser?.id, 'SOLICITACAO_DEVOLVIDA', { reason: reason.trim() })
+    await connection.commit()
+    broadcast('requests-changed', { requestId, reason: 'return-to-seller' })
+
+    let emailSent = false
+    if (mailer) {
+      try {
+        await mailer.sendMail({
+          from: process.env.SMTP_FROM || process.env.SMTP_USER,
+          to: requestRow.sellerEmail,
+          subject: `Cadastro devolvido para ajustes - ${requestRow.protocol}`,
+          text: `Olá,\n\nO cadastro ${requestRow.protocol} (${requestRow.companyName}) foi devolvido pela analista e precisa de ajustes antes de continuar a análise.\n\nMotivo: ${reason.trim()}\n\nAcesse "Minhas solicitações" para editar e reenviar o cadastro.\n\nSis-Cred Cadastro e Crédito`,
+          html: emailLayout({
+            eyebrow: `Protocolo ${requestRow.protocol}`,
+            title: 'Cadastro devolvido para ajustes',
+            bodyHtml: `<p style="margin:0 0 14px;font-size:14px;color:#3a4756;line-height:1.6;">Olá,</p>
+              <p style="margin:0 0 14px;font-size:14px;color:#3a4756;line-height:1.6;">O cadastro <strong>${escapeHtml(requestRow.protocol)}</strong> (${escapeHtml(requestRow.companyName)}) foi devolvido pela analista e precisa de ajustes antes de continuar a análise.</p>
+              <div style="margin:0 0 18px;padding:14px 16px;background:#f5f7fa;border-left:4px solid #fbba00;border-radius:6px;"><p style="margin:0 0 4px;font-size:11px;font-weight:700;letter-spacing:.5px;color:#96660a;text-transform:uppercase;">Motivo da devolução</p><p style="margin:0;font-size:14px;color:#3a4756;line-height:1.55;">${escapeHtml(reason.trim())}</p></div>
+              <p style="margin:0;font-size:14px;color:#3a4756;line-height:1.6;">Acesse <strong>"Minhas solicitações"</strong> no Sis-Cred para editar e reenviar o cadastro.</p>`,
+          }),
+          attachments: emailAttachments,
+        })
+        emailSent = true
+      } catch (error) {
+        console.error(error)
+      }
+    }
+    response.json({ status: 'DEVOLVIDA', emailSent })
+  } catch (error) {
+    await connection?.rollback()
+    console.error(error)
+    response.status(500).json({ message: 'Não foi possível devolver o cadastro.' })
+  } finally {
+    connection?.release()
+  }
+})
+
+app.patch('/api/credit-requests/:id', authorize('VENDEDOR', 'ADMIN'), async (request, response) => {
+  const requestId = Number(request.params.id)
+  const authUser = (request as AuthRequest).user
+  const {
+    clientCode, companyName, tradeName, cnpj, stateRegistration, phone, address,
+    invoiceEmail, financeEmail, contactName, contactEmail, requestPurpose, purchaseAuthorization,
+    deliveryType, deliveryLocation, deliveryAddress, origin, sellerNotes,
+  } = request.body
+  if (!requestId || !clientCode || !companyName || !cnpj || !requestPurpose || !contactName || !contactEmail || !purchaseAuthorization || !deliveryType || !deliveryLocation) {
+    response.status(400).json({ message: 'Código, motivo da solicitação, contato, autorização de compra, tipo e local de entrega são obrigatórios.' })
+    return
+  }
+  let connection
+  try {
+    connection = await pool.getConnection()
+    if (!(await ensureRequestAccess(connection, requestId, authUser))) { response.status(404).json({ message: 'Solicitação não encontrada.' }); return }
+    const [requestRow] = await connection.query('SELECT status, protocol FROM credit_requests WHERE id = ?', [requestId])
+    if (!requestRow) { response.status(404).json({ message: 'Solicitação não encontrada.' }); return }
+    if (requestRow.status !== 'DEVOLVIDA') { response.status(400).json({ message: 'Só é possível editar cadastros devolvidos para ajustes.' }); return }
+    await connection.beginTransaction()
+    await connection.query(
+      `UPDATE credit_requests SET
+        client_code = ?, company_name = ?, trade_name = ?, cnpj = ?, state_registration = ?, phone = ?, address = ?,
+        invoice_email = ?, finance_email = ?, contact_name = ?, contact_email = ?, request_purpose = ?, purchase_authorization = ?,
+        delivery_type = ?, delivery_location = ?, delivery_address = ?, origin = ?, seller_notes = ?,
+        status = 'RECEBIDA', return_reason = NULL
+       WHERE id = ?`,
+      [clientCode, companyName, tradeName || null, cnpj, stateRegistration || null, phone || null, address || null, invoiceEmail || null, financeEmail || null, contactName, contactEmail, requestPurpose, purchaseAuthorization, deliveryType, deliveryLocation, deliveryAddress || null, origin || null, sellerNotes || null, requestId],
+    )
+    await logAuditEvent(connection, requestId, authUser?.id, 'SOLICITACAO_REENVIADA', { protocol: requestRow.protocol })
+    await connection.commit()
+    broadcast('requests-changed', { requestId, reason: 'resent' })
+    response.json({ status: 'RECEBIDA' })
+  } catch (error) {
+    await connection?.rollback()
+    console.error(error)
+    response.status(500).json({ message: 'Não foi possível reenviar o cadastro.' })
   } finally {
     connection?.release()
   }
@@ -894,11 +1088,24 @@ app.patch('/api/credit-requests/:id/decision', authorize('GESTORA', 'ADMIN'), as
     let emailError: string | null = null
     if (recipientEmail && mailer) {
       const subject = `Resultado da análise de crédito - ${requestRow.protocol}`
+      const formattedLimit = Number(approvedLimit || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
       const text = decision === 'APROVADA'
-        ? `Olá,\n\nA solicitação de crédito ${requestRow.protocol} (${requestRow.companyName}) foi APROVADA.\nLimite aprovado: ${Number(approvedLimit || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}\n\nEste limite ainda não foi atualizado no sistema Prático e está aguardando a analista realizar essa atualização. Assim que o Prático for atualizado, você receberá um novo e-mail confirmando a liberação.\n\nSis-Cred Cadastro e Crédito`
+        ? `Olá,\n\nA solicitação de crédito ${requestRow.protocol} (${requestRow.companyName}) foi APROVADA.\nLimite aprovado: ${formattedLimit}\n\nEste limite ainda não foi atualizado no sistema Prático e está aguardando a analista realizar essa atualização. Assim que o Prático for atualizado, você receberá um novo e-mail confirmando a liberação.\n\nSis-Cred Cadastro e Crédito`
         : `Olá,\n\nA solicitação de crédito ${requestRow.protocol} (${requestRow.companyName}) foi NEGADA.\n\nEste resultado ainda não foi registrado no sistema Prático e está aguardando a analista realizar essa atualização. Assim que o Prático for atualizado, você receberá um novo e-mail confirmando o registro.\n\nSis-Cred Cadastro e Crédito`
+      const html = emailLayout({
+        eyebrow: `Protocolo ${requestRow.protocol}`,
+        title: decision === 'APROVADA' ? 'Crédito aprovado' : 'Crédito negado',
+        bodyHtml: decision === 'APROVADA'
+          ? `<p style="margin:0 0 14px;font-size:14px;color:#3a4756;line-height:1.6;">Olá,</p>
+            <p style="margin:0 0 16px;font-size:14px;color:#3a4756;line-height:1.6;">A solicitação de crédito <strong>${escapeHtml(requestRow.protocol)}</strong> (${escapeHtml(requestRow.companyName)}) foi <strong style="color:#16966b;">APROVADA</strong>.</p>
+            <div style="margin:0 0 18px;padding:14px 16px;background:#e9f8f2;border-radius:8px;"><p style="margin:0 0 4px;font-size:11px;font-weight:700;letter-spacing:.5px;color:#0f6b4c;text-transform:uppercase;">Limite aprovado</p><p style="margin:0;font-size:22px;font-weight:800;color:#0f6b4c;">${formattedLimit}</p></div>
+            ${warningCallout('Este limite ainda não foi atualizado no sistema Prático e está aguardando a analista realizar essa atualização. Assim que o Prático for atualizado, você receberá um novo e-mail confirmando a liberação.')}`
+          : `<p style="margin:0 0 14px;font-size:14px;color:#3a4756;line-height:1.6;">Olá,</p>
+            <p style="margin:0 0 16px;font-size:14px;color:#3a4756;line-height:1.6;">A solicitação de crédito <strong>${escapeHtml(requestRow.protocol)}</strong> (${escapeHtml(requestRow.companyName)}) foi <strong style="color:#c0392b;">NEGADA</strong>.</p>
+            ${warningCallout('Este resultado ainda não foi registrado no sistema Prático e está aguardando a analista realizar essa atualização. Assim que o Prático for atualizado, você receberá um novo e-mail confirmando o registro.')}`,
+      })
       try {
-        await mailer.sendMail({ from: process.env.SMTP_FROM || process.env.SMTP_USER, to: recipientEmail, subject, text })
+        await mailer.sendMail({ from: process.env.SMTP_FROM || process.env.SMTP_USER, to: recipientEmail, subject, text, html, attachments: emailAttachments })
         emailSent = true
       } catch (error) {
         console.error(error)
@@ -910,6 +1117,68 @@ app.patch('/api/credit-requests/:id/decision', authorize('GESTORA', 'ADMIN'), as
     await connection?.rollback()
     console.error(error)
     response.status(500).json({ message: 'Não foi possível registrar a decisão.' })
+  } finally {
+    connection?.release()
+  }
+})
+
+app.patch('/api/credit-requests/:id/reopen', authorize('GESTORA', 'ADMIN'), async (request, response) => {
+  const requestId = Number(request.params.id)
+  const authUser = (request as AuthRequest).user
+  const { approvedLimit, internalReason, clientMessage, recipientEmail } = request.body
+  const managerId = authUser?.id
+  if (!requestId || !managerId || approvedLimit == null || Number(approvedLimit) <= 0 || !internalReason) {
+    response.status(400).json({ message: 'Informe o novo limite aprovado e a justificativa da reabertura.' })
+    return
+  }
+  let connection
+  try {
+    connection = await pool.getConnection()
+    const [requestRow] = await connection.query('SELECT protocol, company_name AS companyName, status FROM credit_requests WHERE id = ?', [requestId])
+    if (!requestRow) { response.status(404).json({ message: 'Solicitação não encontrada.' }); return }
+    if (requestRow.status !== 'NEGADA') { response.status(400).json({ message: 'Só é possível reabrir solicitações negadas.' }); return }
+    await connection.beginTransaction()
+    await connection.query(
+      'INSERT INTO credit_decisions (request_id, manager_id, decision, approved_limit, internal_reason) VALUES (?, ?, ?, ?, ?)',
+      [requestId, managerId, 'APROVADA', approvedLimit, internalReason],
+    )
+    // Reabrir devolve a solicitação para a fila de "pendentes de confirmação" da analista,
+    // já que o Prático ainda reflete a negativa (ou o limite antigo) e precisa ser atualizado de novo.
+    await connection.query(
+      'UPDATE credit_requests SET status = ?, approved_limit = ?, client_message = ?, pratico_confirmed_at = NULL, pratico_confirmed_by = NULL WHERE id = ?',
+      ['APROVADA', approvedLimit, clientMessage || null, requestId],
+    )
+    await logAuditEvent(connection, requestId, managerId, 'DECISAO_REABERTA', { approvedLimit, internalReason })
+    await connection.commit()
+    broadcast('requests-changed', { requestId, reason: 'reopen' })
+
+    let emailSent = false
+    let emailError: string | null = null
+    if (recipientEmail && mailer) {
+      const subject = `Solicitação reaberta e aprovada - ${requestRow.protocol}`
+      const formattedLimit = Number(approvedLimit).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
+      const text = `Olá,\n\nA solicitação de crédito ${requestRow.protocol} (${requestRow.companyName}), que havia sido negada, foi REABERTA pela gestão e agora está APROVADA.\nNovo limite aprovado: ${formattedLimit}\n\nEste novo limite ainda não foi atualizado no sistema Prático e está aguardando a analista realizar essa atualização. Assim que o Prático for atualizado, você receberá um novo e-mail confirmando a liberação.\n\nSis-Cred Cadastro e Crédito`
+      const html = emailLayout({
+        eyebrow: `Protocolo ${requestRow.protocol}`,
+        title: 'Solicitação reaberta e aprovada',
+        bodyHtml: `<p style="margin:0 0 14px;font-size:14px;color:#3a4756;line-height:1.6;">Olá,</p>
+          <p style="margin:0 0 16px;font-size:14px;color:#3a4756;line-height:1.6;">A solicitação de crédito <strong>${escapeHtml(requestRow.protocol)}</strong> (${escapeHtml(requestRow.companyName)}), que havia sido negada, foi <strong>REABERTA</strong> pela gestão e agora está <strong style="color:#16966b;">APROVADA</strong>.</p>
+          <div style="margin:0 0 18px;padding:14px 16px;background:#e9f8f2;border-radius:8px;"><p style="margin:0 0 4px;font-size:11px;font-weight:700;letter-spacing:.5px;color:#0f6b4c;text-transform:uppercase;">Novo limite aprovado</p><p style="margin:0;font-size:22px;font-weight:800;color:#0f6b4c;">${formattedLimit}</p></div>
+          ${warningCallout('Este novo limite ainda não foi atualizado no sistema Prático e está aguardando a analista realizar essa atualização. Assim que o Prático for atualizado, você receberá um novo e-mail confirmando a liberação.')}`,
+      })
+      try {
+        await mailer.sendMail({ from: process.env.SMTP_FROM || process.env.SMTP_USER, to: recipientEmail, subject, text, html, attachments: emailAttachments })
+        emailSent = true
+      } catch (error) {
+        console.error(error)
+        emailError = 'Não foi possível enviar o e-mail.'
+      }
+    }
+    response.json({ status: 'APROVADA', emailSent, emailError })
+  } catch (error) {
+    await connection?.rollback()
+    console.error(error)
+    response.status(500).json({ message: 'Não foi possível reabrir a solicitação.' })
   } finally {
     connection?.release()
   }
@@ -940,11 +1209,22 @@ app.patch('/api/credit-requests/:id/pratico-confirm', authorize('ANALISTA', 'ADM
     let emailError: string | null = null
     if (mailer) {
       const subject = `Limite atualizado no sistema Prático - ${requestRow.protocol}`
+      const formattedLimit = Number(requestRow.approvedLimit || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
       const text = requestRow.status === 'APROVADA'
-        ? `Olá,\n\nO limite de crédito aprovado da solicitação ${requestRow.protocol} (${requestRow.companyName}) já foi atualizado no sistema Prático.\nLimite: ${Number(requestRow.approvedLimit || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}\n\nSis-Cred Cadastro e Crédito`
+        ? `Olá,\n\nO limite de crédito aprovado da solicitação ${requestRow.protocol} (${requestRow.companyName}) já foi atualizado no sistema Prático.\nLimite: ${formattedLimit}\n\nSis-Cred Cadastro e Crédito`
         : `Olá,\n\nA negativa de crédito da solicitação ${requestRow.protocol} (${requestRow.companyName}) já foi registrada no sistema Prático.\n\nSis-Cred Cadastro e Crédito`
+      const html = emailLayout({
+        eyebrow: `Protocolo ${requestRow.protocol}`,
+        title: 'Atualização confirmada no Prático',
+        bodyHtml: requestRow.status === 'APROVADA'
+          ? `<p style="margin:0 0 16px;font-size:14px;color:#3a4756;line-height:1.6;">Olá,</p>
+            <p style="margin:0 0 16px;font-size:14px;color:#3a4756;line-height:1.6;">O limite de crédito aprovado da solicitação <strong>${escapeHtml(requestRow.protocol)}</strong> (${escapeHtml(requestRow.companyName)}) já foi atualizado no sistema Prático.</p>
+            <div style="margin:0 0 6px;padding:14px 16px;background:#e9f8f2;border-radius:8px;"><p style="margin:0 0 4px;font-size:11px;font-weight:700;letter-spacing:.5px;color:#0f6b4c;text-transform:uppercase;">Limite liberado</p><p style="margin:0;font-size:22px;font-weight:800;color:#0f6b4c;">${formattedLimit}</p></div>`
+          : `<p style="margin:0 0 16px;font-size:14px;color:#3a4756;line-height:1.6;">Olá,</p>
+            ${successCallout(`A negativa de crédito da solicitação ${requestRow.protocol} (${requestRow.companyName}) já foi registrada no sistema Prático.`)}`,
+      })
       try {
-        await mailer.sendMail({ from: process.env.SMTP_FROM || process.env.SMTP_USER, to: requestRow.sellerEmail, subject, text })
+        await mailer.sendMail({ from: process.env.SMTP_FROM || process.env.SMTP_USER, to: requestRow.sellerEmail, subject, text, html, attachments: emailAttachments })
         emailSent = true
       } catch (error) {
         console.error(error)
