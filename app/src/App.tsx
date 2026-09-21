@@ -84,6 +84,64 @@ const loadStoredUser = (): AuthUser | null => {
   try { return JSON.parse(raw) as AuthUser } catch { return null }
 }
 
+// Toque curto e discreto (dois tons sintetizados) para acompanhar as notificações em tempo
+// real — evita depender de um arquivo de áudio e funciona mesmo offline.
+let notificationAudioContext: AudioContext | null = null
+const playNotificationSound = () => {
+  try {
+    const AudioContextClass = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+    if (!AudioContextClass) return
+    if (!notificationAudioContext) notificationAudioContext = new AudioContextClass()
+    const ctx = notificationAudioContext
+    if (ctx.state === 'suspended') ctx.resume().catch(() => {})
+    const now = ctx.currentTime
+    const gain = ctx.createGain()
+    gain.gain.setValueAtTime(0, now)
+    gain.gain.linearRampToValueAtTime(0.11, now + 0.02)
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.34)
+    gain.connect(ctx.destination)
+    const playTone = (frequency: number, start: number, duration: number) => {
+      const oscillator = ctx.createOscillator()
+      oscillator.type = 'sine'
+      oscillator.frequency.value = frequency
+      oscillator.connect(gain)
+      oscillator.start(now + start)
+      oscillator.stop(now + start + duration)
+    }
+    playTone(880, 0, 0.14)
+    playTone(1175, 0.12, 0.18)
+  } catch { /* áudio indisponível (ex.: navegador bloqueou antes de qualquer interação) — a notificação visual já é suficiente */ }
+}
+
+type RequestChangedEvent = { requestId: number; reason: string; actorId?: number; sellerId?: number; protocol?: string; companyName?: string; status?: Status }
+
+// Decide se um evento em tempo real (vindo do SSE) merece um aviso para o usuário logado —
+// nunca para quem provocou a própria mudança, já que essa pessoa recebe feedback local na hora.
+const describeRequestChangeNotification = (event: RequestChangedEvent, user: AuthUser): string | null => {
+  if (event.actorId != null && event.actorId === user.id) return null
+  const who = event.companyName ? `${event.companyName}${event.protocol ? ` (${event.protocol})` : ''}` : event.protocol || 'uma solicitação'
+  if (user.role === 'VENDEDOR') {
+    if (event.sellerId !== user.id) return null
+    switch (event.reason) {
+      case 'return-to-seller': return `Cadastro devolvido para ajustes: ${who}.`
+      case 'decision': return event.status === 'APROVADA' ? `Crédito aprovado: ${who}.` : `Crédito negado: ${who}.`
+      case 'reopen': return `Solicitação reaberta e aprovada: ${who}.`
+      case 'pratico-confirm': return `Atualização confirmada no sistema Prático: ${who}.`
+      default: return null
+    }
+  }
+  if (user.role === 'ANALISTA') {
+    switch (event.reason) {
+      case 'created': return `Novo cadastro recebido: ${who}.`
+      case 'resent': return `Cadastro corrigido e reenviado: ${who}.`
+      case 'decision': return `Decisão registrada para ${who} — confirme a atualização no Prático.`
+      case 'reopen': return `Solicitação reaberta para ${who} — confirme a atualização no Prático.`
+      default: return null
+    }
+  }
+  return null
+}
+
 type ToastKind = 'success' | 'error' | 'info'
 type Toast = { id: number; kind: ToastKind; message: string }
 const ToastContext = createContext<(kind: ToastKind, message: string) => void>(() => {})
@@ -206,7 +264,14 @@ function App() {
         const { ticket } = await response.json()
         if (cancelled) return
         source = new EventSource(`${apiUrl}/api/events?ticket=${encodeURIComponent(ticket)}`)
-        source.addEventListener('requests-changed', () => { loadRequests().catch(() => {}) })
+        source.addEventListener('requests-changed', (event) => {
+          loadRequests().catch(() => {})
+          try {
+            const payload = JSON.parse((event as MessageEvent).data) as RequestChangedEvent
+            const message = describeRequestChangeNotification(payload, user)
+            if (message) { pushToast('info', message); playNotificationSound() }
+          } catch { /* payload inesperado — a lista já foi recarregada de qualquer forma */ }
+        })
         source.onerror = () => {
           source?.close()
           if (!cancelled) retryTimeout = setTimeout(connect, 3000)
@@ -1248,7 +1313,12 @@ function DecisionsView({ pendingDecisions, historyDecisions, onConfirmPratico }:
 function ManagementView({ requests, deniedItems, onReloadRequests, selected, setSelected, decision, onDecision }: { requests: Request[]; deniedItems: Request[]; onReloadRequests: () => void; selected: Request; setSelected: (item: Request) => void; decision: 'APROVADA' | 'NEGADA' | null; onDecision: (status: Status, approvedLimit?: number, recipientEmail?: string, internalReason?: string, clientMessage?: string) => void }) {
   const [subView, setSubView] = useState<'fila' | 'negadas'>('fila')
   const pushToast = useToast()
-  const [approvedLimit, setApprovedLimit] = useState(0)
+  // Guardado como texto (não number) para não reformatar o campo a cada tecla digitada —
+  // um <input type="number"> controlado por um valor numérico reconstrói o texto exibido a
+  // cada onChange, o que embaralha a digitação em teclados numéricos. Convertemos para
+  // número só na hora de validar/enviar (approvedLimitValue, abaixo).
+  const [approvedLimit, setApprovedLimit] = useState('0')
+  const approvedLimitValue = Number(approvedLimit.replace(',', '.')) || 0
   const [recipientEmail, setRecipientEmail] = useState(selected.sellerEmail)
   const [internalReason, setInternalReason] = useState('')
   const [clientMessage, setClientMessage] = useState('')
@@ -1268,8 +1338,8 @@ function ManagementView({ requests, deniedItems, onReloadRequests, selected, set
     (deniedSearchDigits.length > 0 && item.cnpj.replace(/\D/g, '').includes(deniedSearchDigits)))
   useEffect(() => {
     setRecipientEmail(selected.sellerEmail); setInternalReason(''); setClientMessage(''); setReopenError('')
-    setApprovedLimit(isDenied ? (selected.approvedLimit ?? 0) : 0)
-    if (isQueued || isDenied) listDocuments(selected.id).then((docs) => { setRequestDocuments(docs); if (!isDenied) setApprovedLimit(docs.find((d) => d.documentType === 'DEPS')?.extractedData?.suggestedLimit ?? 0) })
+    setApprovedLimit(String(isDenied ? (selected.approvedLimit ?? 0) : 0))
+    if (isQueued || isDenied) listDocuments(selected.id).then((docs) => { setRequestDocuments(docs); if (!isDenied) setApprovedLimit(String(docs.find((d) => d.documentType === 'DEPS')?.extractedData?.suggestedLimit ?? 0)) })
     else setRequestDocuments([])
   }, [selected.id, isQueued, isDenied, selected.sellerEmail, selected.approvedLimit])
   useEffect(() => {
@@ -1281,11 +1351,11 @@ function ManagementView({ requests, deniedItems, onReloadRequests, selected, set
   const deps = depsDoc?.extractedData ?? null
 
   const submitReopen = async () => {
-    if (!approvedLimit || approvedLimit <= 0) { setReopenError('Informe o novo limite aprovado.'); return }
+    if (!approvedLimitValue || approvedLimitValue <= 0) { setReopenError('Informe o novo limite aprovado.'); return }
     if (!internalReason.trim()) { setReopenError('Informe a justificativa da reabertura.'); return }
     setReopenSubmitting(true); setReopenError('')
     try {
-      const response = await apiFetch(`/api/credit-requests/${selected.id}/reopen`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ approvedLimit, internalReason, clientMessage: clientMessage || null, recipientEmail: recipientEmail || null }) })
+      const response = await apiFetch(`/api/credit-requests/${selected.id}/reopen`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ approvedLimit: approvedLimitValue, internalReason, clientMessage: clientMessage || null, recipientEmail: recipientEmail || null }) })
       const body = await response.json().catch(() => null)
       if (!response.ok) { setReopenError(body?.message || 'Não foi possível reabrir a solicitação.'); return }
       await onReloadRequests()
@@ -1325,7 +1395,7 @@ function ManagementView({ requests, deniedItems, onReloadRequests, selected, set
         {decisionDetail && <div className="notice notice-error" style={{ marginBottom: 4 }}><X size={17} /> Negada por {decisionDetail.managerName} em {formatDateTime(decisionDetail.decidedAt)}{decisionDetail.internalReason ? ` — motivo registrado: "${decisionDetail.internalReason}"` : ''}</div>}
         <section className="review-card"><div className="card-heading"><div><h2>Dados do vendedor</h2><p>Para identificar quem fez a solicitação.</p></div></div><div className="data-grid" style={{ gridTemplateColumns: '1fr 1fr 1fr' }}><div><span>Nome</span><strong>{selected.sellerName || '—'}</strong></div><div><span>Código no Prático</span><strong>{selected.sellerCode || '—'}</strong></div><div><span>Loja</span><strong>{selected.sellerStore || '—'}</strong></div><div><span>Gerente responsável</span><strong>{selected.sellerManagerName || '—'}</strong></div><div><span>E-mail</span><strong>{selected.sellerEmail || '—'}</strong></div><div><span>WhatsApp</span><strong>{selected.sellerWhatsapp ? <a href={whatsappLink(selected.sellerWhatsapp)} target="_blank" rel="noreferrer">{selected.sellerWhatsapp}</a> : '—'}</strong></div></div></section>
         <section className="review-card" style={{ marginTop: 16 }}><div className="card-heading"><div><h2>Resumo da análise</h2><p>Dados extraídos pela analista a partir do Serasa e DEPS.</p></div><span className="tag">Dossiê completo</span></div>{depsDoc && !deps && <div className="notice notice-error"><X size={17} /> Não foi possível extrair os dados automaticamente do PDF de Avaliação DEPS. Confira o arquivo original.</div>}<div className="score-row"><div className="score-main"><span>Classificação DEPS</span><strong>{deps?.classification ?? '—'}</strong><small>Limite sugerido: {deps ? money(deps.suggestedLimit) : '—'}</small></div><div className="score-item"><span>Pontuação positiva</span><strong className="success-text">{deps ? `${deps.positivePercent.toLocaleString('pt-BR')}%` : '—'}</strong></div><div className="score-item"><span>Pontuação negativa</span><strong className="danger-text">{deps ? `${deps.negativePercent.toLocaleString('pt-BR')}%` : '—'}</strong></div><div className="score-item"><span>Risco</span><strong className="danger-text">{deps?.risk ?? '—'}</strong></div></div><div className="risk-table"><div><span>Protestos</span><strong>{deps?.protests ? `${deps.protests.count} ocorrências · ${money(deps.protests.value)}` : '—'}</strong><b className="danger-text">Atenção</b></div><div><span>PEFIN</span><strong>{deps?.pefin ? `${deps.pefin.count} ocorrências · ${money(deps.pefin.value)}` : '—'}</strong><b className="warning-text">Verificar</b></div><div><span>Histórico de pagamento</span><strong>{deps?.paymentHistoryPercent != null ? `${deps.paymentHistoryPercent.toLocaleString('pt-BR')}% pontual` : '—'}</strong><b className="success-text">Regular</b></div><div><span>Consultas recentes</span><strong>{deps?.consultationsCount != null ? `${deps.consultationsCount} registrada(s)` : '—'}</strong><b>Normal</b></div></div><div className="original-files">{serasaDoc ? <span><FileText size={15} /> {serasaDoc.originalName} <a href="#" onClick={(event) => { event.preventDefault(); viewDocument(serasaDoc.id) }}>Visualizar</a></span> : <span><FileText size={15} /> Consulta Serasa <em style={{ color: '#b3bcc7', fontStyle: 'normal' }}>não anexada</em></span>}{depsDoc ? <span><FileText size={15} /> {depsDoc.originalName} <a href="#" onClick={(event) => { event.preventDefault(); viewDocument(depsDoc.id) }}>Visualizar</a></span> : <span><FileText size={15} /> Avaliação DEPS <em style={{ color: '#b3bcc7', fontStyle: 'normal' }}>não anexada</em></span>}</div></section>
-        <section className="decision-card" style={{ marginTop: 16 }}><p className="eyebrow">REABERTURA DA DECISÃO</p><h2>Novo limite e justificativa</h2><label>Novo limite aprovado<input type="number" min="0.01" step="0.01" value={approvedLimit} onChange={(event) => setApprovedLimit(Number(event.target.value))} /></label><label>Justificativa da reabertura<textarea rows={3} value={internalReason} onChange={(event) => setInternalReason(event.target.value)} placeholder="Motivo da gestão para reverter a negativa"></textarea></label><label>Mensagem para o vendedor<textarea rows={3} value={clientMessage} onChange={(event) => setClientMessage(event.target.value)} placeholder="Explicação que o vendedor verá em Minhas solicitações"></textarea></label><label>E-mail para envio do resultado<input type="email" value={recipientEmail} onChange={(event) => setRecipientEmail(event.target.value)} placeholder="email@empresa.com.br" /></label>{reopenError && <div className="notice notice-error"><X size={17} /> {reopenError}</div>}<div className="decision-buttons" style={{ gridTemplateColumns: '1fr' }}><button className="approve-btn" disabled={reopenSubmitting} onClick={submitReopen}><RotateCcw size={17} /> {reopenSubmitting ? 'Reabrindo...' : 'Reabrir e aprovar'}</button></div><small className="decision-note"><Bell size={13} /> A justificativa fica registrada no histórico da solicitação e um e-mail com o resultado será enviado ao endereço confirmado acima.</small></section>
+        <section className="decision-card" style={{ marginTop: 16 }}><p className="eyebrow">REABERTURA DA DECISÃO</p><h2>Novo limite e justificativa</h2><label>Novo limite aprovado<input type="number" min="0.01" step="0.01" value={approvedLimit} onChange={(event) => setApprovedLimit(event.target.value)} /></label><label>Justificativa da reabertura<textarea rows={3} value={internalReason} onChange={(event) => setInternalReason(event.target.value)} placeholder="Motivo da gestão para reverter a negativa"></textarea></label><label>Mensagem para o vendedor<textarea rows={3} value={clientMessage} onChange={(event) => setClientMessage(event.target.value)} placeholder="Explicação que o vendedor verá em Minhas solicitações"></textarea></label><label>E-mail para envio do resultado<input type="email" value={recipientEmail} onChange={(event) => setRecipientEmail(event.target.value)} placeholder="email@empresa.com.br" /></label>{reopenError && <div className="notice notice-error"><X size={17} /> {reopenError}</div>}<div className="decision-buttons" style={{ gridTemplateColumns: '1fr' }}><button className="approve-btn" disabled={reopenSubmitting} onClick={submitReopen}><RotateCcw size={17} /> {reopenSubmitting ? 'Reabrindo...' : 'Reabrir e aprovar'}</button></div><small className="decision-note"><Bell size={13} /> A justificativa fica registrada no histórico da solicitação e um e-mail com o resultado será enviado ao endereço confirmado acima.</small></section>
       </>}</div>
     </div> : <div className="analyst-layout">
       <div className="queue-card">
@@ -1336,7 +1406,7 @@ function ManagementView({ requests, deniedItems, onReloadRequests, selected, set
         <div className="dossier-head"><div><p className="eyebrow">SOLICITAÇÃO {selected.protocol}</p><h2>{selected.companyName}</h2><div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}><span className="user-role">Código Prático: {selected.clientCode}</span><span className="user-role">CNPJ: {selected.cnpj}</span></div></div></div>
         <section className="review-card"><div className="card-heading"><div><h2>Dados do vendedor</h2><p>Para identificar quem fez a solicitação.</p></div></div><div className="data-grid" style={{ gridTemplateColumns: '1fr 1fr 1fr' }}><div><span>Nome</span><strong>{selected.sellerName || '—'}</strong></div><div><span>Código no Prático</span><strong>{selected.sellerCode || '—'}</strong></div><div><span>Loja</span><strong>{selected.sellerStore || '—'}</strong></div><div><span>Gerente responsável</span><strong>{selected.sellerManagerName || '—'}</strong></div><div><span>E-mail</span><strong>{selected.sellerEmail || '—'}</strong></div><div><span>WhatsApp</span><strong>{selected.sellerWhatsapp ? <a href={whatsappLink(selected.sellerWhatsapp)} target="_blank" rel="noreferrer">{selected.sellerWhatsapp}</a> : '—'}</strong></div></div></section>
         <section className="review-card" style={{ marginTop: 16 }}><div className="card-heading"><div><h2>Resumo da análise</h2><p>Dados extraídos pela analista a partir do Serasa e DEPS.</p></div><span className="tag">Dossiê completo</span></div>{depsDoc && !deps && <div className="notice notice-error"><X size={17} /> Não foi possível extrair os dados automaticamente do PDF de Avaliação DEPS. Confira o arquivo original.</div>}<div className="score-row"><div className="score-main"><span>Classificação DEPS</span><strong>{deps?.classification ?? '—'}</strong><small>Limite sugerido: {deps ? money(deps.suggestedLimit) : '—'}</small></div><div className="score-item"><span>Pontuação positiva</span><strong className="success-text">{deps ? `${deps.positivePercent.toLocaleString('pt-BR')}%` : '—'}</strong></div><div className="score-item"><span>Pontuação negativa</span><strong className="danger-text">{deps ? `${deps.negativePercent.toLocaleString('pt-BR')}%` : '—'}</strong></div><div className="score-item"><span>Risco</span><strong className="danger-text">{deps?.risk ?? '—'}</strong></div></div><div className="risk-table"><div><span>Protestos</span><strong>{deps?.protests ? `${deps.protests.count} ocorrências · ${money(deps.protests.value)}` : '—'}</strong><b className="danger-text">Atenção</b></div><div><span>PEFIN</span><strong>{deps?.pefin ? `${deps.pefin.count} ocorrências · ${money(deps.pefin.value)}` : '—'}</strong><b className="warning-text">Verificar</b></div><div><span>Histórico de pagamento</span><strong>{deps?.paymentHistoryPercent != null ? `${deps.paymentHistoryPercent.toLocaleString('pt-BR')}% pontual` : '—'}</strong><b className="success-text">Regular</b></div><div><span>Consultas recentes</span><strong>{deps?.consultationsCount != null ? `${deps.consultationsCount} registrada(s)` : '—'}</strong><b>Normal</b></div></div><div className="original-files">{serasaDoc ? <span><FileText size={15} /> {serasaDoc.originalName} <a href="#" onClick={(event) => { event.preventDefault(); viewDocument(serasaDoc.id) }}>Visualizar</a></span> : <span><FileText size={15} /> Consulta Serasa <em style={{ color: '#b3bcc7', fontStyle: 'normal' }}>não anexada</em></span>}{depsDoc ? <span><FileText size={15} /> {depsDoc.originalName} <a href="#" onClick={(event) => { event.preventDefault(); viewDocument(depsDoc.id) }}>Visualizar</a></span> : <span><FileText size={15} /> Avaliação DEPS <em style={{ color: '#b3bcc7', fontStyle: 'normal' }}>não anexada</em></span>}</div></section>
-        <section className="decision-card" style={{ marginTop: 16 }}><p className="eyebrow">PARECER FINAL</p><h2>Qual limite deve ser liberado?</h2><label>Limite aprovado<input type="number" min="0" step="0.01" value={approvedLimit} onChange={(event) => setApprovedLimit(Number(event.target.value))} /></label><label>Justificativa interna<textarea rows={3} value={internalReason} onChange={(event) => setInternalReason(event.target.value)} placeholder="Observações visíveis apenas para a gestão e analista"></textarea></label><label>Mensagem para o vendedor<textarea rows={3} value={clientMessage} onChange={(event) => setClientMessage(event.target.value)} placeholder="Explicação que o vendedor verá em Minhas solicitações"></textarea></label><label>E-mail para envio do resultado<input type="email" value={recipientEmail} onChange={(event) => setRecipientEmail(event.target.value)} placeholder="email@empresa.com.br" /></label><div className="decision-buttons"><button className={decision === 'NEGADA' ? 'deny-btn chosen' : 'deny-btn'} onClick={() => onDecision('NEGADA', undefined, recipientEmail, internalReason, clientMessage)}><X size={17} /> Negar crédito</button><button className={decision === 'APROVADA' ? 'approve-btn chosen' : 'approve-btn'} onClick={() => onDecision('APROVADA', approvedLimit, recipientEmail, internalReason, clientMessage)}><Check size={17} /> Aprovar crédito</button></div><small className="decision-note"><Bell size={13} /> Ao decidir, um e-mail com o resultado será enviado para o endereço confirmado acima.</small></section>
+        <section className="decision-card" style={{ marginTop: 16 }}><p className="eyebrow">PARECER FINAL</p><h2>Qual limite deve ser liberado?</h2><label>Limite aprovado<input type="number" min="0" step="0.01" value={approvedLimit} onChange={(event) => setApprovedLimit(event.target.value)} /></label><label>Justificativa interna<textarea rows={3} value={internalReason} onChange={(event) => setInternalReason(event.target.value)} placeholder="Observações visíveis apenas para a gestão e analista"></textarea></label><label>Mensagem para o vendedor<textarea rows={3} value={clientMessage} onChange={(event) => setClientMessage(event.target.value)} placeholder="Explicação que o vendedor verá em Minhas solicitações"></textarea></label><label>E-mail para envio do resultado<input type="email" value={recipientEmail} onChange={(event) => setRecipientEmail(event.target.value)} placeholder="email@empresa.com.br" /></label><div className="decision-buttons"><button className={decision === 'NEGADA' ? 'deny-btn chosen' : 'deny-btn'} onClick={() => onDecision('NEGADA', undefined, recipientEmail, internalReason, clientMessage)}><X size={17} /> Negar crédito</button><button className={decision === 'APROVADA' ? 'approve-btn chosen' : 'approve-btn'} onClick={() => onDecision('APROVADA', approvedLimitValue, recipientEmail, internalReason, clientMessage)}><Check size={17} /> Aprovar crédito</button></div><small className="decision-note"><Bell size={13} /> Ao decidir, um e-mail com o resultado será enviado para o endereço confirmado acima.</small></section>
       </>}</div>
     </div>}
   </>

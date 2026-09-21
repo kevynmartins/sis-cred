@@ -782,7 +782,7 @@ app.post('/api/credit-requests', authorize('VENDEDOR', 'ADMIN'), async (request,
     const requestId = Number(result.insertId)
     await logAuditEvent(connection, requestId, effectiveSellerId, 'SOLICITACAO_CRIADA', { protocol, companyName })
     await connection.commit()
-    broadcast('requests-changed', { requestId, reason: 'created' })
+    broadcast('requests-changed', { requestId, reason: 'created', actorId: effectiveSellerId, sellerId: effectiveSellerId, protocol, companyName, status: 'RECEBIDA' })
     response.status(201).json({ id: requestId, protocol })
   } catch (error) {
     await connection?.rollback()
@@ -831,7 +831,7 @@ app.patch('/api/credit-requests/:id/return-to-seller', authorize('ANALISTA', 'AD
   try {
     connection = await pool.getConnection()
     const [requestRow] = await connection.query(
-      `SELECT r.protocol, r.company_name AS companyName, r.status, u.email AS sellerEmail
+      `SELECT r.protocol, r.company_name AS companyName, r.status, r.seller_id AS sellerId, u.email AS sellerEmail
        FROM credit_requests r INNER JOIN users u ON u.id = r.seller_id WHERE r.id = ?`,
       [requestId],
     )
@@ -844,7 +844,7 @@ app.patch('/api/credit-requests/:id/return-to-seller', authorize('ANALISTA', 'AD
     await connection.query('UPDATE credit_requests SET status = ?, return_reason = ? WHERE id = ?', ['DEVOLVIDA', reason.trim(), requestId])
     await logAuditEvent(connection, requestId, authUser?.id, 'SOLICITACAO_DEVOLVIDA', { reason: reason.trim() })
     await connection.commit()
-    broadcast('requests-changed', { requestId, reason: 'return-to-seller' })
+    broadcast('requests-changed', { requestId, reason: 'return-to-seller', actorId: authUser?.id, sellerId: requestRow.sellerId, protocol: requestRow.protocol, companyName: requestRow.companyName, status: 'DEVOLVIDA' })
 
     let emailSent = false
     if (mailer) {
@@ -910,7 +910,7 @@ app.patch('/api/credit-requests/:id', authorize('VENDEDOR', 'ADMIN'), async (req
     )
     await logAuditEvent(connection, requestId, authUser?.id, 'SOLICITACAO_REENVIADA', { protocol: requestRow.protocol })
     await connection.commit()
-    broadcast('requests-changed', { requestId, reason: 'resent' })
+    broadcast('requests-changed', { requestId, reason: 'resent', actorId: authUser?.id, protocol: requestRow.protocol, companyName, status: 'RECEBIDA' })
     response.json({ status: 'RECEBIDA' })
   } catch (error) {
     await connection?.rollback()
@@ -1068,7 +1068,7 @@ app.patch('/api/credit-requests/:id/decision', authorize('GESTORA', 'ADMIN'), as
   let connection
   try {
     connection = await pool.getConnection()
-    const [requestRow] = await connection.query('SELECT protocol, company_name AS companyName FROM credit_requests WHERE id = ?', [requestId])
+    const [requestRow] = await connection.query('SELECT protocol, company_name AS companyName, seller_id AS sellerId FROM credit_requests WHERE id = ?', [requestId])
     if (!requestRow) { response.status(404).json({ message: 'Solicitação não encontrada.' }); return }
     await connection.beginTransaction()
     const status = decision === 'APROVADA' ? 'APROVADA' : 'NEGADA'
@@ -1082,7 +1082,7 @@ app.patch('/api/credit-requests/:id/decision', authorize('GESTORA', 'ADMIN'), as
     )
     await logAuditEvent(connection, requestId, managerId, 'DECISAO_REGISTRADA', { decision, approvedLimit: approvedLimit || null })
     await connection.commit()
-    broadcast('requests-changed', { requestId, reason: 'decision' })
+    broadcast('requests-changed', { requestId, reason: 'decision', actorId: managerId, sellerId: requestRow.sellerId, protocol: requestRow.protocol, companyName: requestRow.companyName, status })
 
     let emailSent = false
     let emailError: string | null = null
@@ -1134,7 +1134,7 @@ app.patch('/api/credit-requests/:id/reopen', authorize('GESTORA', 'ADMIN'), asyn
   let connection
   try {
     connection = await pool.getConnection()
-    const [requestRow] = await connection.query('SELECT protocol, company_name AS companyName, status FROM credit_requests WHERE id = ?', [requestId])
+    const [requestRow] = await connection.query('SELECT protocol, company_name AS companyName, status, seller_id AS sellerId FROM credit_requests WHERE id = ?', [requestId])
     if (!requestRow) { response.status(404).json({ message: 'Solicitação não encontrada.' }); return }
     if (requestRow.status !== 'NEGADA') { response.status(400).json({ message: 'Só é possível reabrir solicitações negadas.' }); return }
     await connection.beginTransaction()
@@ -1150,7 +1150,7 @@ app.patch('/api/credit-requests/:id/reopen', authorize('GESTORA', 'ADMIN'), asyn
     )
     await logAuditEvent(connection, requestId, managerId, 'DECISAO_REABERTA', { approvedLimit, internalReason })
     await connection.commit()
-    broadcast('requests-changed', { requestId, reason: 'reopen' })
+    broadcast('requests-changed', { requestId, reason: 'reopen', actorId: managerId, sellerId: requestRow.sellerId, protocol: requestRow.protocol, companyName: requestRow.companyName, status: 'APROVADA' })
 
     let emailSent = false
     let emailError: string | null = null
@@ -1192,7 +1192,7 @@ app.patch('/api/credit-requests/:id/pratico-confirm', authorize('ANALISTA', 'ADM
   try {
     connection = await pool.getConnection()
     const rows = await connection.query(
-      `SELECT r.protocol, r.company_name AS companyName, r.status, r.approved_limit AS approvedLimit,
+      `SELECT r.protocol, r.company_name AS companyName, r.status, r.approved_limit AS approvedLimit, r.seller_id AS sellerId,
         r.pratico_confirmed_at AS praticoConfirmedAt, u.name AS sellerName, u.email AS sellerEmail
        FROM credit_requests r INNER JOIN users u ON u.id = r.seller_id WHERE r.id = ?`,
       [requestId],
@@ -1203,7 +1203,7 @@ app.patch('/api/credit-requests/:id/pratico-confirm', authorize('ANALISTA', 'ADM
     if (requestRow.praticoConfirmedAt) { response.status(409).json({ message: 'Esta atualização já havia sido confirmada.' }); return }
     await connection.query('UPDATE credit_requests SET pratico_confirmed_at = NOW(), pratico_confirmed_by = ? WHERE id = ?', [authUser?.id, requestId])
     await logAuditEvent(connection, requestId, authUser?.id, 'PRATICO_CONFIRMADO', { status: requestRow.status })
-    broadcast('requests-changed', { requestId, reason: 'pratico-confirm' })
+    broadcast('requests-changed', { requestId, reason: 'pratico-confirm', actorId: authUser?.id, sellerId: requestRow.sellerId, protocol: requestRow.protocol, companyName: requestRow.companyName, status: requestRow.status })
 
     let emailSent = false
     let emailError: string | null = null
