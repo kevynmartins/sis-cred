@@ -757,6 +757,78 @@ app.patch('/api/admin/users/:id/reset-password', authorize('ADMIN', 'GESTORA'), 
   }
 })
 
+app.patch('/api/admin/users/:id', authorize('ADMIN', 'GESTORA'), async (request, response) => {
+  const userId = Number(request.params.id)
+  const authUser = (request as AuthRequest).user
+  const { name, email, role, praticoSellerCode, storeName, managerName, whatsappPhone } = request.body
+  const allowedRoles = manageableRoles(authUser!.role)
+  if (!userId) { response.status(400).json({ message: 'Usuário inválido.' }); return }
+  if (!name || !email || !allowedRoles.includes(role)) {
+    response.status(400).json({ message: 'Nome, e-mail e função são obrigatórios.' })
+    return
+  }
+  if (role === 'VENDEDOR' && (!praticoSellerCode || !storeName || !managerName || !whatsappPhone)) {
+    response.status(400).json({ message: 'Para vendedores, informe código no Prático, loja, gerente e WhatsApp.' })
+    return
+  }
+  const sellerFields = role === 'VENDEDOR' ? [praticoSellerCode, storeName, managerName, whatsappPhone] : [null, null, null, null]
+  let connection
+  try {
+    connection = await pool.getConnection()
+    const target = await connection.query('SELECT role FROM users WHERE id = ?', [userId])
+    if (!target[0] || !allowedRoles.includes(target[0].role)) {
+      response.status(404).json({ message: 'Usuário não encontrado.' })
+      return
+    }
+    await connection.query(
+      'UPDATE users SET name = ?, email = ?, role = ?, pratico_seller_code = ?, store_name = ?, manager_name = ?, whatsapp_phone = ? WHERE id = ?',
+      [name, email, role, ...sellerFields, userId],
+    )
+    const rows = await connection.query(
+      `SELECT id, name, email, role, pratico_seller_code AS praticoSellerCode, store_name AS storeName,
+        manager_name AS managerName, whatsapp_phone AS whatsappPhone, active
+       FROM users WHERE id = ?`,
+      [userId],
+    )
+    response.json(rows[0])
+  } catch (error) {
+    console.error(error)
+    response.status(409).json({ message: 'Não foi possível salvar as alterações. Verifique se o e-mail já está em uso.' })
+  } finally {
+    connection?.release()
+  }
+})
+
+app.delete('/api/admin/users/:id', authorize('ADMIN', 'GESTORA'), async (request, response) => {
+  const userId = Number(request.params.id)
+  const authUser = (request as AuthRequest).user
+  if (!userId) { response.status(400).json({ message: 'Usuário inválido.' }); return }
+  if (userId === authUser!.id) {
+    response.status(400).json({ message: 'Você não pode excluir a própria conta.' })
+    return
+  }
+  let connection
+  try {
+    connection = await pool.getConnection()
+    const target = await connection.query('SELECT role FROM users WHERE id = ?', [userId])
+    if (!target[0] || !manageableRoles(authUser!.role).includes(target[0].role)) {
+      response.status(404).json({ message: 'Usuário não encontrado.' })
+      return
+    }
+    await connection.query('DELETE FROM users WHERE id = ?', [userId])
+    response.json({ message: 'Usuário excluído com sucesso.' })
+  } catch (error: any) {
+    if (error?.errno === 1451 || error?.code === 'ER_ROW_IS_REFERENCED_2') {
+      response.status(409).json({ message: 'Este usuário possui solicitações ou registros vinculados e não pode ser excluído. Suspenda o acesso em vez de excluir.' })
+      return
+    }
+    console.error(error)
+    response.status(500).json({ message: 'Não foi possível excluir o usuário.' })
+  } finally {
+    connection?.release()
+  }
+})
+
 app.post('/api/credit-requests', authorize('VENDEDOR', 'ADMIN'), async (request, response) => {
   const authUser = (request as AuthRequest).user
   const {
