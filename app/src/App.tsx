@@ -489,7 +489,7 @@ function App() {
           </div>}
         </div>
       </div></header>
-      <div className="content-wrap"><div key={view} className="page-enter">{view === 'audit' && (role === 'admin' || role === 'gestao') ? <AuditView requests={items} /> : view === 'users' && (role === 'admin' || role === 'gestao') ? <UserManagementView isAdmin={role === 'admin'} /> : view === 'decisions' && role === 'analista' ? <DecisionsView pendingDecisions={pendingDecisions} historyDecisions={historyDecisions} onConfirmPratico={confirmPraticoUpdate} /> : view === 'requests' && role === 'vendedor' ? <SellerRequestsView requests={items} onNew={() => { setEditingRequest(null); setView('main') }} onEdit={(item) => { setEditingRequest(item); setView('main') }} /> : <>{role === 'vendedor' && <SellerForm key={editingRequest?.id ?? 'new'} initialRequest={editingRequest} onSubmit={editingRequest ? (form, file) => resendRequest(editingRequest.id, form, file) : createRequest} />}{role === 'analista' && <AnalystView requests={triageItems} selected={selected} setSelected={setSelected} onSend={() => updateStatus('AGUARDANDO_GESTAO')} onReturned={handleReturnedToSeller} />}{role === 'gestao' && <ManagementView requests={items.filter((item) => item.status === 'AGUARDANDO_GESTAO')} deniedItems={items.filter((item) => item.status === 'NEGADA')} onReloadRequests={loadRequests} selected={selected} setSelected={setSelected} decision={decision} onDecision={updateStatus} />}{role === 'admin' && <AdminView />}</>}</div></div></main>
+      <div className="content-wrap"><div key={view} className="page-enter">{view === 'audit' && (role === 'admin' || role === 'gestao') ? <AuditView requests={items} /> : view === 'users' && (role === 'admin' || role === 'gestao') ? <UserManagementView isAdmin={role === 'admin'} currentUserId={user.id} /> : view === 'decisions' && role === 'analista' ? <DecisionsView pendingDecisions={pendingDecisions} historyDecisions={historyDecisions} onConfirmPratico={confirmPraticoUpdate} /> : view === 'requests' && role === 'vendedor' ? <SellerRequestsView requests={items} onNew={() => { setEditingRequest(null); setView('main') }} onEdit={(item) => { setEditingRequest(item); setView('main') }} /> : <>{role === 'vendedor' && <SellerForm key={editingRequest?.id ?? 'new'} initialRequest={editingRequest} onSubmit={editingRequest ? (form, file) => resendRequest(editingRequest.id, form, file) : createRequest} />}{role === 'analista' && <AnalystView requests={triageItems} selected={selected} setSelected={setSelected} onSend={() => updateStatus('AGUARDANDO_GESTAO')} onReturned={handleReturnedToSeller} />}{role === 'gestao' && <ManagementView requests={items.filter((item) => item.status === 'AGUARDANDO_GESTAO')} deniedItems={items.filter((item) => item.status === 'NEGADA')} onReloadRequests={loadRequests} selected={selected} setSelected={setSelected} decision={decision} onDecision={updateStatus} />}{role === 'admin' && <AdminView />}</>}</div></div></main>
     {showChangePassword && <ChangePasswordModal onClose={() => setShowChangePassword(false)} onSuccess={() => { setShowChangePassword(false); pushToast('success', 'Senha atualizada com sucesso.') }} />}
     {showEditProfile && <EditProfileModal user={user} avatarSrc={avatarSrc} onClose={() => setShowEditProfile(false)} onSaved={saveProfilePatch} />}
     {burst && <ConfirmationBurst ok={burst.ok} title={burst.title} message={burst.message} onDone={() => setBurst(null)} />}
@@ -616,6 +616,37 @@ function CreateUserModal({ roleOptions, onClose, onCreated }: { roleOptions: Arr
   return <div className="modal-backdrop"><form className="modal" onSubmit={submit}><div className="modal-head"><div><p className="eyebrow">NOVO ACESSO</p><h2>Criar usuário</h2></div><button type="button" onClick={onClose}><X size={19} /></button></div><p className="modal-copy">Defina o acesso e a senha inicial. O usuário poderá trocá-la depois de entrar.</p><label>Nome completo<input name="name" required placeholder="Nome do colaborador" /></label><label>E-mail corporativo<input name="email" required type="email" placeholder="colaborador@empresa.com.br" /></label><label>Função<select name="role" value={role} onChange={(event) => setRole(event.target.value)}>{roleOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>{role === 'VENDEDOR' && <><label>Código do vendedor no Prático<input name="praticoSellerCode" required placeholder="Ex.: 1234" /></label><label>Loja<input name="storeName" required placeholder="Loja onde o vendedor trabalha" /></label><label>Nome do gerente<input name="managerName" required placeholder="Gerente responsável pelo vendedor" /></label><label>WhatsApp do vendedor<input name="whatsappPhone" required placeholder="(00) 00000-0000" /></label></>}<label>Senha inicial<input name="password" type="password" required placeholder="Defina a senha de acesso" /></label><small className="login-foot"><ShieldCheck size={13} /> {passwordHint}</small>{error && <div className="notice notice-error"><X size={17} /> {error}</div>}<div className="modal-actions"><button type="button" className="cancel-btn" onClick={onClose}>Cancelar</button><button type="submit" className="primary-btn" disabled={submitting}><Check size={17} /> {submitting ? 'Criando...' : 'Criar acesso'}</button></div></form></div>
 }
 
+function EditUserModal({ user, roleOptions, onClose, onSaved }: { user: ManagedUser; roleOptions: Array<{ value: string; label: string }>; onClose: () => void; onSaved: () => void }) {
+  const [role, setRole] = useState(user.role)
+  const [error, setError] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const submit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    setSubmitting(true); setError('')
+    const form = new FormData(event.currentTarget)
+    try {
+      const response = await apiFetch(`/api/admin/users/${user.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: form.get('name'), email: form.get('email'), role: form.get('role'), praticoSellerCode: form.get('praticoSellerCode'), storeName: form.get('storeName'), managerName: form.get('managerName'), whatsappPhone: form.get('whatsappPhone') }) })
+      if (!response.ok) { const body = await response.json().catch(() => null); setError(body?.message || 'Não foi possível salvar as alterações.'); return }
+      onSaved()
+    } catch { setError('Não foi possível conectar à API.')
+    } finally { setSubmitting(false) }
+  }
+  return <div className="modal-backdrop"><form className="modal" onSubmit={submit}><div className="modal-head"><div><p className="eyebrow">EDITAR CADASTRO</p><h2>Editar usuário</h2></div><button type="button" onClick={onClose}><X size={19} /></button></div><p className="modal-copy">Atualize os dados de acesso e cadastro deste usuário.</p><label>Nome completo<input name="name" required defaultValue={user.name} placeholder="Nome do colaborador" /></label><label>E-mail corporativo<input name="email" required type="email" defaultValue={user.email} placeholder="colaborador@empresa.com.br" /></label><label>Função<select name="role" value={role} onChange={(event) => setRole(event.target.value)}>{roleOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>{role === 'VENDEDOR' && <><label>Código do vendedor no Prático<input name="praticoSellerCode" required defaultValue={user.praticoSellerCode ?? ''} placeholder="Ex.: 1234" /></label><label>Loja<input name="storeName" required defaultValue={user.storeName ?? ''} placeholder="Loja onde o vendedor trabalha" /></label><label>Nome do gerente<input name="managerName" required defaultValue={user.managerName ?? ''} placeholder="Gerente responsável pelo vendedor" /></label><label>WhatsApp do vendedor<input name="whatsappPhone" required defaultValue={user.whatsappPhone ?? ''} placeholder="(00) 00000-0000" /></label></>}{error && <div className="notice notice-error"><X size={17} /> {error}</div>}<div className="modal-actions"><button type="button" className="cancel-btn" onClick={onClose}>Cancelar</button><button type="submit" className="primary-btn" disabled={submitting}><Check size={17} /> {submitting ? 'Salvando...' : 'Salvar alterações'}</button></div></form></div>
+}
+
+function DeleteUserModal({ userName, onClose, onDone, onSubmit }: { userName: string; onClose: () => void; onDone: () => void; onSubmit: () => Promise<string | null> }) {
+  const [error, setError] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const confirm = async () => {
+    setSubmitting(true); setError('')
+    const errorMessage = await onSubmit()
+    setSubmitting(false)
+    if (errorMessage) { setError(errorMessage); return }
+    onDone()
+  }
+  return <div className="modal-backdrop"><div className="modal"><div className="modal-head"><div><p className="eyebrow">AÇÃO IRREVERSÍVEL</p><h2>Excluir {userName}</h2></div><button type="button" onClick={onClose}><X size={19} /></button></div><p className="modal-copy">Esta ação exclui definitivamente o acesso de {userName} ao sistema e não pode ser desfeita. Se este usuário tiver solicitações ou registros vinculados, a exclusão será bloqueada — nesse caso, suspenda o acesso em vez de excluir.</p>{error && <div className="notice notice-error"><X size={17} /> {error}</div>}<div className="modal-actions"><button type="button" className="cancel-btn" onClick={onClose}>Cancelar</button><button type="button" className="primary-btn" style={{ background: '#e05252', color: '#fff' }} disabled={submitting} onClick={confirm}><Trash2 size={17} /> {submitting ? 'Excluindo...' : 'Excluir usuário'}</button></div></div></div>
+}
+
 function ResetUserPasswordModal({ userName, onClose, onDone, onSubmit }: { userName: string; onClose: () => void; onDone: () => void; onSubmit: (newPassword: string) => Promise<string | null> }) {
   const [newPassword, setNewPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
@@ -635,11 +666,19 @@ function ResetUserPasswordModal({ userName, onClose, onDone, onSubmit }: { userN
 
 type ManagedUser = { id: number; name: string; email: string; role: string; praticoSellerCode: string | null; storeName: string | null; managerName: string | null; whatsappPhone: string | null; active: number }
 
-function UserManagementView({ isAdmin }: { isAdmin: boolean }) {
+function UserManagementView({ isAdmin, currentUserId }: { isAdmin: boolean; currentUserId: number }) {
   const [users, setUsers] = useState<ManagedUser[]>([])
   const [showUserForm, setShowUserForm] = useState(false)
   const [resetTarget, setResetTarget] = useState<ManagedUser | null>(null)
+  const [editTarget, setEditTarget] = useState<ManagedUser | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<ManagedUser | null>(null)
+  const [search, setSearch] = useState('')
   const pushToast = useToast()
+  const roleOptions = isAdmin ? adminRoleOptions : managementRoleOptions
+  const normalizedSearch = search.trim().toLowerCase()
+  const filteredUsers = normalizedSearch
+    ? users.filter((managedUser) => managedUser.name.toLowerCase().includes(normalizedSearch) || (managedUser.praticoSellerCode ?? '').toLowerCase().includes(normalizedSearch))
+    : users
   const load = async () => { const response = await apiFetch('/api/admin/users'); setUsers(await response.json()) }
   useEffect(() => { load().catch(() => pushToast('error', 'Não foi possível carregar os usuários.')) }, [])
   const toggleUser = async (id: number) => { await apiFetch(`/api/admin/users/${id}/toggle`, { method: 'PATCH' }); await load() }
@@ -649,20 +688,33 @@ function UserManagementView({ isAdmin }: { isAdmin: boolean }) {
     if (!response.ok) { const body = await response.json().catch(() => null); return body?.message || 'Não foi possível trocar a senha.' }
     return null
   }
-  return <><PageHeader eyebrow="GESTÃO DE USUÁRIOS" title="Usuários e acessos" subtitle={isAdmin ? 'Crie, suspenda e troque a senha de qualquer acesso do sistema.' : 'Crie, suspenda e troque a senha dos acessos de vendedores, analistas e gestão.'} action={<button className="primary-btn" onClick={() => setShowUserForm(true)}><Plus size={18} /> Criar usuário</button>} />
-    <section className="admin-card"><div className="card-heading"><div><h2>Usuários e permissões</h2><p>{isAdmin ? 'Todos os acessos do sistema.' : 'Acessos de vendedores, analistas e gestão.'}</p></div><span className="tag">{users.length} cadastrados</span></div>
-      <div className="user-table"><div className="user-head" style={{ gridTemplateColumns: '1.4fr .8fr .8fr 140px 140px' }}><span>USUÁRIO</span><span>FUNÇÃO</span><span>ACESSO</span><span></span><span></span></div>
-        {users.map((managedUser) => <div className="user-row" style={{ gridTemplateColumns: '1.4fr .8fr .8fr 140px 140px' }} key={managedUser.id}>
+  const deleteUser = async (): Promise<string | null> => {
+    if (!deleteTarget) return null
+    const response = await apiFetch(`/api/admin/users/${deleteTarget.id}`, { method: 'DELETE' })
+    if (!response.ok) { const body = await response.json().catch(() => null); return body?.message || 'Não foi possível excluir o usuário.' }
+    return null
+  }
+  return <><PageHeader eyebrow="GESTÃO DE USUÁRIOS" title="Usuários e acessos" subtitle={isAdmin ? 'Crie, edite, suspenda ou exclua qualquer acesso do sistema.' : 'Crie, edite, suspenda ou exclua acessos de vendedores, analistas e gestão.'} action={<button className="primary-btn" onClick={() => setShowUserForm(true)}><Plus size={18} /> Criar usuário</button>} />
+    <section className="admin-card"><div className="card-heading"><div><h2>Usuários e permissões</h2><p>{isAdmin ? 'Todos os acessos do sistema.' : 'Acessos de vendedores, analistas e gestão.'}</p></div><span className="tag">{filteredUsers.length} de {users.length} cadastrados</span></div>
+      <div className="search" style={{ marginTop: 14 }}><Search size={16} /><input placeholder="Buscar por nome ou código de vendedor" value={search} onChange={(event) => setSearch(event.target.value)} /></div>
+      <div className="user-table"><div className="user-head" style={{ gridTemplateColumns: '1.4fr .8fr .8fr auto' }}><span>USUÁRIO</span><span>FUNÇÃO</span><span>ACESSO</span><span></span></div>
+        {filteredUsers.length ? filteredUsers.map((managedUser) => <div className="user-row" style={{ gridTemplateColumns: '1.4fr .8fr .8fr auto' }} key={managedUser.id}>
           <div><strong>{managedUser.name}</strong><small>{managedUser.email}{managedUser.storeName ? ` · ${managedUser.storeName} · Cód. Prático ${managedUser.praticoSellerCode}` : ''}</small></div>
           <span className="user-role">{managedUser.role}</span>
           <span className={managedUser.active ? 'access-active' : 'access-inactive'}><i></i>{managedUser.active ? 'Ativo' : 'Suspenso'}</span>
-          <button className="small-action" onClick={() => setResetTarget(managedUser)}>Trocar senha</button>
-          <button className="small-action" onClick={() => toggleUser(managedUser.id)}>{managedUser.active ? 'Suspender' : 'Reativar'}</button>
-        </div>)}
+          <div className="user-actions">
+            <button className="small-action" onClick={() => setEditTarget(managedUser)}>Editar</button>
+            <button className="small-action" onClick={() => setResetTarget(managedUser)}>Trocar senha</button>
+            <button className="small-action" onClick={() => toggleUser(managedUser.id)}>{managedUser.active ? 'Suspender' : 'Reativar'}</button>
+            {managedUser.id !== currentUserId && <button className="small-action danger" onClick={() => setDeleteTarget(managedUser)}>Excluir</button>}
+          </div>
+        </div>) : <p className="dropdown-empty" style={{ padding: '18px 10px' }}>Nenhum usuário encontrado para "{search}".</p>}
       </div>
     </section>
-    {showUserForm && <CreateUserModal roleOptions={isAdmin ? adminRoleOptions : managementRoleOptions} onClose={() => setShowUserForm(false)} onCreated={() => { setShowUserForm(false); load(); pushToast('success', 'Usuário criado com acesso ativo.') }} />}
+    {showUserForm && <CreateUserModal roleOptions={roleOptions} onClose={() => setShowUserForm(false)} onCreated={() => { setShowUserForm(false); load(); pushToast('success', 'Usuário criado com acesso ativo.') }} />}
+    {editTarget && <EditUserModal user={editTarget} roleOptions={roleOptions} onClose={() => setEditTarget(null)} onSaved={() => { setEditTarget(null); load(); pushToast('success', 'Cadastro do usuário atualizado com sucesso.') }} />}
     {resetTarget && <ResetUserPasswordModal userName={resetTarget.name} onClose={() => setResetTarget(null)} onSubmit={resetPassword} onDone={() => { setResetTarget(null); pushToast('success', 'Senha do usuário atualizada com sucesso.') }} />}
+    {deleteTarget && <DeleteUserModal userName={deleteTarget.name} onClose={() => setDeleteTarget(null)} onSubmit={deleteUser} onDone={() => { setDeleteTarget(null); load(); pushToast('success', 'Usuário excluído com sucesso.') }} />}
   </>
 }
 
