@@ -737,7 +737,7 @@ function UpdateCheckCard() {
   }
   useEffect(check, [])
   const copyDeployCommand = () => {
-    const command = 'cd /opt/sis-cred && ./deploy/linux/update.sh'
+    const command = 'cd /opt/sis-cred/app && ./deploy/linux/update.sh'
     navigator.clipboard.writeText(command)
       .then(() => pushToast('success', 'Comando copiado. Rode-o via SSH no servidor.'))
       .catch(() => pushToast('error', 'Não foi possível copiar o comando. Copie manualmente: ' + command))
