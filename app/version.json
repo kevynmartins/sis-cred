@@ -1,6 +1,14 @@
 {
-  "version": "1.0.1",
+  "version": "1.0.2",
   "changelog": [
+    {
+      "version": "1.0.2",
+      "date": "2026-09-25",
+      "notes": [
+        "Corrige o comando de atualização sugerido no painel do administrador (faltava a pasta app).",
+        "O script de atualização do servidor já vem pronto para rodar, sem precisar de um passo manual antes."
+      ]
+    },
     {
       "version": "1.0.1",
       "date": "2026-09-25",
