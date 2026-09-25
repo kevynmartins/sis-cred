@@ -1,10 +1,11 @@
 {
-  "version": "1.0.0",
+  "version": "1.0.1",
   "changelog": [
     {
-      "version": "1.0.0",
+      "version": "1.0.1",
       "date": "2026-09-25",
       "notes": [
+        "Número da versão 1.0.1",
         "Número da versão do sistema aparece no menu lateral, com um aviso do que mudou a cada atualização.",
         "O painel do administrador avisa quando há uma nova versão disponível no GitHub, com botão para ver o changelog e copiar o comando de deploy."
       ]
