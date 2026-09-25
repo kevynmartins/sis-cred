@@ -8,3 +8,7 @@ app/.env.*
 
 # Documentos e materiais de referência do negócio (dados reais de clientes) — nunca versionar.
 informações/
+
+# PDFs dos manuais de usuário são gerados a partir de app/docs/manuais/*.md — regenere quando
+# precisar, não versionar (ver app/docs/manuais/README.md).
+Manual_*.pdf

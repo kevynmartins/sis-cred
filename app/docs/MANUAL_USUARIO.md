@@ -60,7 +60,7 @@ Formulário para abrir uma solicitação de crédito para um cliente novo ou exi
 
 ![Formulário de novo cadastro, seção Identificação da empresa preenchida com CNPJ, razão social e endereço](./screenshots/03-vendedor-novo-cadastro-empresa.jpg)
 
-- **Identificação da empresa**: código do cadastro no Prático, CNPJ (com botão **"Preencher informações"** que consulta a Receita Federal via BrasilAPI e preenche razão social, nome fantasia, telefone e endereço automaticamente — apenas para CNPJ numérico tradicional), razão social, nome fantasia, inscrição estadual, endereço.
+- **Identificação da empresa**: busca do cadastro no Prático pelo **código do cliente** ou pelo **CNPJ/CPF** (botão **"Buscar no Prático e preencher"**, que preenche código, documento, razão social, nome fantasia, IE, endereço e contato), código do cadastro no Prático, CNPJ ou CPF, razão social, nome fantasia, inscrição estadual, endereço.
 - **Motivo da solicitação**: texto livre explicando o que o vendedor precisa (aprovação, aumento de limite, novo cadastro etc.).
 - **Contato do cliente**: nome(s), telefone(s) e e-mail(s) de contato (é possível adicionar mais de um de cada, com o botão "+"), e-mail para nota fiscal/avisos de vencimento e e-mail financeiro.
 - **Perguntas obrigatórias**: origem do cliente, forma de autorização de compra, tipo de entrega e local de entrega (com campo de endereço alternativo se não for na própria empresa).
