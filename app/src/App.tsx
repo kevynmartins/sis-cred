@@ -1,6 +1,22 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
-import { Activity, ArrowLeft, ArrowUpRight, Bell, Building2, Camera, Check, CheckCircle2, ChevronDown, ChevronUp, ClipboardCheck, ClipboardList, Download, Eye, FileCheck2, FileText, Info, LogOut, Menu, MessageSquareText, Paperclip, Pencil, Phone, Plus, RotateCcw, Search, Send, ShieldCheck, Trash2, UploadCloud, Users, X, XCircle } from 'lucide-react'
+import { Activity, ArrowLeft, ArrowUpRight, Bell, Building2, Camera, Check, CheckCircle2, ChevronDown, ChevronUp, ClipboardCheck, ClipboardList, Download, Eye, FileCheck2, FileText, Info, LogOut, Menu, MessageSquareText, Paperclip, Pencil, Phone, Plus, RotateCcw, Search, Send, ShieldCheck, Sparkles, Trash2, UploadCloud, Users, X, XCircle } from 'lucide-react'
 import './App.css'
+import versionData from '../version.json'
+
+type ChangelogEntry = { version: string; date: string; notes: string[] }
+const CURRENT_VERSION: string = versionData.version
+const CHANGELOG: ChangelogEntry[] = versionData.changelog
+const lastSeenVersionKey = 'sisCredLastSeenVersion'
+// Compara versões "x.y.z" numericamente (não como texto, onde "10" < "9").
+const compareVersions = (a: string, b: string) => {
+  const partsA = a.split('.').map(Number)
+  const partsB = b.split('.').map(Number)
+  for (let i = 0; i < Math.max(partsA.length, partsB.length); i++) {
+    const diff = (partsA[i] || 0) - (partsB[i] || 0)
+    if (diff) return diff
+  }
+  return 0
+}
 
 type Role = 'vendedor' | 'analista' | 'gestao' | 'admin'
 type BackendRole = 'VENDEDOR' | 'ANALISTA' | 'GESTORA' | 'ADMIN'
@@ -35,6 +51,13 @@ const formatCnpj = (raw: string) => {
   }
   return masked
 }
+// Até 11 dígitos numéricos é tratado como CPF; com letras ou mais caracteres, como CNPJ.
+const formatDocument = (raw: string) => {
+  const alnum = raw.toUpperCase().replace(/[^A-Z0-9]/g, '')
+  if (alnum.length > 11 || /[A-Z]/.test(alnum)) return formatCnpj(raw)
+  return alnum.replace(/^(\d{3})(\d)/, '$1.$2').replace(/^(\d{3})\.(\d{3})(\d)/, '$1.$2.$3').replace(/\.(\d{3})(\d{1,2})$/, '.$1-$2')
+}
+type PraticoClient = { clientCode: string; companyCode: number | null; personType: 'F' | 'J'; document: string | null; companyName: string | null; tradeName: string | null; stateRegistration: string | null; phones: string[]; email: string | null; contactName: string | null; address: string | null }
 const initials = (name: string) => name.trim().split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase() || '').join('') || '?'
 const avatarMimeTypes = ['image/jpeg', 'image/png', 'image/webp']
 const statusLabel: Record<Status, string> = { RECEBIDA: 'Recebida', EM_ANALISE: 'Em análise', AGUARDANDO_GESTAO: 'Aguardando gestão', APROVADA: 'Aprovada', NEGADA: 'Negada', DEVOLVIDA: 'Devolvida para ajustes' }
@@ -188,6 +211,17 @@ function ConfirmationBurst({ ok, title, message, onDone }: { ok: boolean; title:
   </div>
 }
 
+function WhatsNewModal({ entries, onClose }: { entries: ChangelogEntry[]; onClose: () => void }) {
+  return <div className="modal-backdrop"><div className="modal" style={{ maxWidth: 480 }}>
+    <div className="modal-head"><div><p className="eyebrow">NOVIDADES</p><h2>O que mudou no Sis-Cred</h2></div><button type="button" onClick={onClose}><X size={19} /></button></div>
+    <div style={{ margin: '4px 0 20px' }}>{entries.map((entry) => <div key={entry.version} style={{ marginBottom: 16 }}>
+      <strong style={{ display: 'block', fontSize: 13, color: '#233347', marginBottom: 5 }}>Versão {entry.version} · {new Date(`${entry.date}T00:00:00`).toLocaleDateString('pt-BR')}</strong>
+      <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13, color: '#5b6a7d', lineHeight: 1.65 }}>{entry.notes.map((note, index) => <li key={index}>{note}</li>)}</ul>
+    </div>)}</div>
+    <div className="modal-actions"><button type="button" className="primary-btn" onClick={onClose}><Check size={17} /> Entendi</button></div>
+  </div></div>
+}
+
 function App() {
   const [resetToken, setResetToken] = useState<string | null>(() => new URLSearchParams(window.location.search).get('resetToken'))
   const [user, setUser] = useState<AuthUser | null>(loadStoredUser)
@@ -195,6 +229,7 @@ function App() {
   const [selected, setSelected] = useState<Request>(emptyRequest)
   const pushToast = useToast()
   const [burst, setBurst] = useState<{ ok: boolean; title: string; message: string } | null>(null)
+  const [whatsNewEntries, setWhatsNewEntries] = useState<ChangelogEntry[] | null>(null)
   const [decision, setDecision] = useState<'APROVADA' | 'NEGADA' | null>(null)
   const [showChangePassword, setShowChangePassword] = useState(false)
   const [showEditProfile, setShowEditProfile] = useState(false)
@@ -412,13 +447,27 @@ function App() {
   }
   const logout = () => { localStorage.removeItem(tokenKey); localStorage.removeItem(userKey); setUser(null) }
 
+  // Mostra "o que mudou" só quando a versão instalada no navegador é mais nova que a última
+  // vista por esta pessoa — nunca no primeiro acesso (não há nada de "novo" para quem chega
+  // agora), e some sozinho quando não há nenhuma nota entre a versão antiga e a atual.
+  useEffect(() => {
+    if (!user) return
+    const lastSeen = localStorage.getItem(lastSeenVersionKey)
+    if (lastSeen && lastSeen !== CURRENT_VERSION) {
+      const entries = CHANGELOG.filter((entry) => compareVersions(entry.version, lastSeen) > 0)
+      if (entries.length) setWhatsNewEntries(entries)
+    }
+    localStorage.setItem(lastSeenVersionKey, CURRENT_VERSION)
+  }, [user])
+  const openChangelog = () => setWhatsNewEntries(CHANGELOG)
+
   const pageLoadingBar = pageLoading && <div className="page-loading-bar"><span></span></div>
 
   if (resetToken) return <>{pageLoadingBar}<ResetPasswordScreen token={resetToken} onDone={() => { window.history.replaceState({}, '', window.location.pathname); setResetToken(null) }} /></>
   if (!user || !role) return <>{pageLoadingBar}<LoginScreen onLogin={(loggedUser) => setUser(loggedUser)} /></>
 
   return <>{pageLoadingBar}<div className="app-shell">
-    <aside className="sidebar"><div className="brand"><img src="/logo_sc.jpg" alt="Sis-Cred" className="brand-logo" /></div><div className="workspace-label">ACESSO ATUAL</div><div className="current-role"><div className="role-icon">{role === 'vendedor' ? <Users size={16} /> : role === 'analista' ? <ClipboardCheck size={16} /> : <ShieldCheck size={16} />}</div><div><strong>{role === 'vendedor' ? 'Vendedor' : role === 'analista' ? 'Analista' : role === 'gestao' ? 'Gestão' : 'Administrador'}</strong><small>Acesso autorizado</small></div></div>{(role === 'admin' || role === 'gestao') && <div className="role-switcher" style={{ marginTop: 18 }}><button className={view === 'main' ? 'nav-item active' : 'nav-item'} onClick={() => setView('main')}>{role === 'admin' ? <Activity size={18} /> : <ShieldCheck size={18} />}<span>{role === 'admin' ? 'Administração' : 'Decisão de crédito'}</span></button><button className={view === 'users' ? 'nav-item active' : 'nav-item'} onClick={() => setView('users')}><Users size={18} /><span>Usuários</span></button><button className={view === 'audit' ? 'nav-item active' : 'nav-item'} onClick={() => setView('audit')}><FileCheck2 size={18} /><span>Auditoria</span></button></div>}{role === 'analista' && <div className="role-switcher" style={{ marginTop: 18 }}><button className={view === 'main' ? 'nav-item active' : 'nav-item'} onClick={() => setView('main')}><ClipboardCheck size={18} /><span>Triagem e dossiê</span></button><button className={view === 'decisions' ? 'nav-item active' : 'nav-item'} onClick={() => setView('decisions')}><FileCheck2 size={18} /><span>Decisões</span>{pendingDecisions.length > 0 && <span className="pending-dot">{pendingDecisions.length}</span>}</button></div>}{role === 'vendedor' && <div className="role-switcher" style={{ marginTop: 18 }}><button className={view === 'main' ? 'nav-item active' : 'nav-item'} onClick={() => { setEditingRequest(null); setView('main') }}><FileText size={18} /><span>Novo cadastro</span></button><button className={view === 'requests' ? 'nav-item active' : 'nav-item'} onClick={() => setView('requests')}><ClipboardCheck size={18} /><span>Minhas solicitações</span></button></div>}<div className="sidebar-bottom"><div className="help-box"><span>Processo digital</span><small>Sem papel no dossiê</small><ArrowUpRight size={16} /></div></div></aside>
+    <aside className="sidebar"><div className="brand"><img src="/logo_sc.jpg" alt="Sis-Cred" className="brand-logo" /></div><div className="workspace-label">ACESSO ATUAL</div><div className="current-role"><div className="role-icon">{role === 'vendedor' ? <Users size={16} /> : role === 'analista' ? <ClipboardCheck size={16} /> : <ShieldCheck size={16} />}</div><div><strong>{role === 'vendedor' ? 'Vendedor' : role === 'analista' ? 'Analista' : role === 'gestao' ? 'Gestão' : 'Administrador'}</strong><small>Acesso autorizado</small></div></div>{(role === 'admin' || role === 'gestao') && <div className="role-switcher" style={{ marginTop: 18 }}><button className={view === 'main' ? 'nav-item active' : 'nav-item'} onClick={() => setView('main')}>{role === 'admin' ? <Activity size={18} /> : <ShieldCheck size={18} />}<span>{role === 'admin' ? 'Administração' : 'Decisão de crédito'}</span></button><button className={view === 'users' ? 'nav-item active' : 'nav-item'} onClick={() => setView('users')}><Users size={18} /><span>Usuários</span></button><button className={view === 'audit' ? 'nav-item active' : 'nav-item'} onClick={() => setView('audit')}><FileCheck2 size={18} /><span>Auditoria</span></button></div>}{role === 'analista' && <div className="role-switcher" style={{ marginTop: 18 }}><button className={view === 'main' ? 'nav-item active' : 'nav-item'} onClick={() => setView('main')}><ClipboardCheck size={18} /><span>Triagem e dossiê</span></button><button className={view === 'decisions' ? 'nav-item active' : 'nav-item'} onClick={() => setView('decisions')}><FileCheck2 size={18} /><span>Decisões</span>{pendingDecisions.length > 0 && <span className="pending-dot">{pendingDecisions.length}</span>}</button></div>}{role === 'vendedor' && <div className="role-switcher" style={{ marginTop: 18 }}><button className={view === 'main' ? 'nav-item active' : 'nav-item'} onClick={() => { setEditingRequest(null); setView('main') }}><FileText size={18} /><span>Novo cadastro</span></button><button className={view === 'requests' ? 'nav-item active' : 'nav-item'} onClick={() => setView('requests')}><ClipboardCheck size={18} /><span>Minhas solicitações</span></button></div>}<div className="sidebar-bottom"><div className="help-box"><span>Processo digital</span><small>Sem papel no dossiê</small><ArrowUpRight size={16} /></div><button type="button" className="version-tag" onClick={openChangelog}><Sparkles size={12} /> v{CURRENT_VERSION} · novidades</button></div></aside>
     <main className="main-content"><header className="topbar"><button className="mobile-menu"><Menu size={21} /></button><div className="breadcrumb">Sis-Cred <span>/</span> <b>{view === 'audit' ? 'Auditoria' : view === 'users' ? 'Usuários' : view === 'decisions' ? 'Decisões' : view === 'requests' ? 'Minhas solicitações' : role === 'vendedor' ? 'Novo cadastro' : role === 'analista' ? 'Triagem e dossiê' : role === 'gestao' ? 'Decisão de crédito' : 'Administração'}</b></div><div className="top-actions">
         <div className="menu-wrap" ref={notifMenuRef}>
           <button type="button" className="icon-btn" onClick={() => { setNotifMenuOpen((open) => !open); setProfileMenuOpen(false) }}><Bell size={19} />{notifications.length > 0 && <i></i>}</button>
@@ -444,6 +493,7 @@ function App() {
     {showChangePassword && <ChangePasswordModal onClose={() => setShowChangePassword(false)} onSuccess={() => { setShowChangePassword(false); pushToast('success', 'Senha atualizada com sucesso.') }} />}
     {showEditProfile && <EditProfileModal user={user} avatarSrc={avatarSrc} onClose={() => setShowEditProfile(false)} onSaved={saveProfilePatch} />}
     {burst && <ConfirmationBurst ok={burst.ok} title={burst.title} message={burst.message} onDone={() => setBurst(null)} />}
+    {whatsNewEntries && <WhatsNewModal entries={whatsNewEntries} onClose={() => setWhatsNewEntries(null)} />}
   </div></>
 }
 
@@ -616,7 +666,56 @@ function UserManagementView({ isAdmin }: { isAdmin: boolean }) {
   </>
 }
 
-function AdminView() { const [overview, setOverview] = useState<{ users: { total: number; active: number }; requests: Array<{ status: string; total: number }>; documents: { total: number }; audit: { total: number } } | null>(null); const pushToast = useToast(); useEffect(() => { apiFetch('/api/admin/overview').then((response) => response.json()).then(setOverview).catch(() => pushToast('error', 'Não foi possível carregar os dados administrativos.')) }, []); return <><PageHeader eyebrow="ADMINISTRAÇÃO DO SISTEMA" title="Controle e conferência" subtitle="Acompanhe a saúde do processo. Para gerenciar acessos, use Usuários no menu." /><section className="admin-metrics"><div><Activity size={19} /><span>Usuários ativos</span><strong>{overview?.users.active ?? '...'}</strong></div><div><FileCheck2 size={19} /><span>Solicitações cadastradas</span><strong>{overview?.requests.reduce((sum, item) => sum + Number(item.total), 0) ?? '...'}</strong></div><div><FileText size={19} /><span>Documentos no dossiê</span><strong>{overview?.documents.total ?? '...'}</strong></div><div><ShieldCheck size={19} /><span>Eventos auditados</span><strong>{overview?.audit.total ?? '...'}</strong></div></section><div className="admin-grid"><section className="admin-card checks-card"><div className="card-heading"><div><h2>Conferências rápidas</h2><p>Visão operacional para manutenção.</p></div></div><div className="check-line"><Check size={16} /><div><strong>Banco de dados</strong><small>MariaDB conectado e respondendo</small></div><b>OK</b></div><div className="check-line"><Check size={16} /><div><strong>Fila de crédito</strong><small>Solicitações por status disponíveis</small></div><b>OK</b></div><div className="check-line"><Check size={16} /><div><strong>Auditoria</strong><small>Decisões registradas no histórico</small></div><b>OK</b></div><div className="check-line"><Check size={16} /><div><strong>Documentos</strong><small>Arquivos vinculados aos dossiês</small></div><b>OK</b></div></section></div></> }
+type UpdateCheckResult = { currentVersion: string; latestVersion: string; updateAvailable: boolean; commitsAhead: number | null; newChangelog: ChangelogEntry[] }
+function UpdateCheckCard() {
+  const [status, setStatus] = useState<'loading' | 'unconfigured' | 'error' | 'ok'>('loading')
+  const [errorMessage, setErrorMessage] = useState('')
+  const [result, setResult] = useState<UpdateCheckResult | null>(null)
+  const [showChangelog, setShowChangelog] = useState(false)
+  const pushToast = useToast()
+  const check = () => {
+    setStatus('loading')
+    apiFetch('/api/admin/updates/check').then(async (response) => {
+      const body = await response.json().catch(() => null)
+      if (response.status === 503) { setErrorMessage(body?.message || 'Verificação de atualização não configurada.'); setStatus('unconfigured'); return }
+      if (!response.ok) { setErrorMessage(body?.message || `A verificação falhou (HTTP ${response.status}).`); setStatus('error'); return }
+      setResult(body)
+      setStatus('ok')
+    }).catch(() => { setErrorMessage('Não foi possível conectar à API.'); setStatus('error') })
+  }
+  useEffect(check, [])
+  const copyDeployCommand = () => {
+    const command = 'cd /opt/sis-cred && ./deploy/linux/update.sh'
+    navigator.clipboard.writeText(command)
+      .then(() => pushToast('success', 'Comando copiado. Rode-o via SSH no servidor.'))
+      .catch(() => pushToast('error', 'Não foi possível copiar o comando. Copie manualmente: ' + command))
+  }
+  // Sempre visível — mesmo quando não configurado ou a checagem falha — para o admin nunca
+  // ficar sem entender por que "não aparece nada": aqui a razão sempre fica explícita.
+  return <section className="admin-card update-check-card">
+    <div className="card-heading">
+      <div><h2>Atualizações do sistema</h2><p>{status === 'ok' && result ? `Versão instalada: v${result.currentVersion}` : `Versão instalada: v${CURRENT_VERSION}`}</p></div>
+      {status === 'ok' && result && <span className={result.updateAvailable ? 'update-badge' : 'update-badge ok'}>{result.updateAvailable ? 'Nova versão disponível' : 'Atualizado'}</span>}
+    </div>
+    {status === 'loading' && <p className="subheading" style={{ margin: '10px 0 0' }}>Verificando no GitHub...</p>}
+    {(status === 'unconfigured' || status === 'error') && <>
+      <p className="subheading" style={{ margin: '10px 0 0' }}>{errorMessage}</p>
+      {status === 'error' && <button type="button" className="link-btn" style={{ padding: '6px 0', marginTop: 4 }} onClick={check}>Tentar de novo</button>}
+    </>}
+    {status === 'ok' && result?.updateAvailable && <>
+      <p className="modal-copy" style={{ margin: '12px 0' }}>Versão v{result.latestVersion} disponível no GitHub{result.commitsAhead != null ? ` · ${result.commitsAhead} commit(s) à frente do seu servidor` : ''}.</p>
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+        {result.newChangelog.length > 0 && <button type="button" className="outline-btn" style={{ width: 'auto', margin: 0 }} onClick={() => setShowChangelog((value) => !value)}>{showChangelog ? 'Ocultar novidades' : 'Ver o que mudou'}</button>}
+        <button type="button" className="outline-btn" style={{ width: 'auto', margin: 0 }} onClick={copyDeployCommand}><Download size={14} /> Copiar comando de deploy</button>
+      </div>
+      {showChangelog && <div style={{ marginTop: 14 }}>{result.newChangelog.map((entry) => <div key={entry.version} style={{ marginBottom: 12 }}>
+        <strong style={{ display: 'block', fontSize: 13, color: '#233347' }}>v{entry.version} · {new Date(`${entry.date}T00:00:00`).toLocaleDateString('pt-BR')}</strong>
+        <ul style={{ margin: '4px 0 0', paddingLeft: 18, fontSize: 13, color: '#5b6a7d' }}>{entry.notes.map((note, index) => <li key={index}>{note}</li>)}</ul>
+      </div>)}</div>}
+    </>}
+  </section>
+}
+function AdminView() { const [overview, setOverview] = useState<{ users: { total: number; active: number }; requests: Array<{ status: string; total: number }>; documents: { total: number }; audit: { total: number } } | null>(null); const pushToast = useToast(); useEffect(() => { apiFetch('/api/admin/overview').then((response) => response.json()).then(setOverview).catch(() => pushToast('error', 'Não foi possível carregar os dados administrativos.')) }, []); return <><PageHeader eyebrow="ADMINISTRAÇÃO DO SISTEMA" title="Controle e conferência" subtitle="Acompanhe a saúde do processo. Para gerenciar acessos, use Usuários no menu." /><UpdateCheckCard /><section className="admin-metrics"><div><Activity size={19} /><span>Usuários ativos</span><strong>{overview?.users.active ?? '...'}</strong></div><div><FileCheck2 size={19} /><span>Solicitações cadastradas</span><strong>{overview?.requests.reduce((sum, item) => sum + Number(item.total), 0) ?? '...'}</strong></div><div><FileText size={19} /><span>Documentos no dossiê</span><strong>{overview?.documents.total ?? '...'}</strong></div><div><ShieldCheck size={19} /><span>Eventos auditados</span><strong>{overview?.audit.total ?? '...'}</strong></div></section><div className="admin-grid"><section className="admin-card checks-card"><div className="card-heading"><div><h2>Conferências rápidas</h2><p>Visão operacional para manutenção.</p></div></div><div className="check-line"><Check size={16} /><div><strong>Banco de dados</strong><small>MariaDB conectado e respondendo</small></div><b>OK</b></div><div className="check-line"><Check size={16} /><div><strong>Fila de crédito</strong><small>Solicitações por status disponíveis</small></div><b>OK</b></div><div className="check-line"><Check size={16} /><div><strong>Auditoria</strong><small>Decisões registradas no histórico</small></div><b>OK</b></div><div className="check-line"><Check size={16} /><div><strong>Documentos</strong><small>Arquivos vinculados aos dossiês</small></div><b>OK</b></div></section></div></> }
 
 const statusOrder: Status[] = ['RECEBIDA', 'EM_ANALISE', 'AGUARDANDO_GESTAO', 'APROVADA', 'NEGADA', 'DEVOLVIDA']
 const documentLabel: Record<string, string> = { CONTRATO_SOCIAL: 'Contrato social / Certificado MEI', SERASA: 'Consulta Serasa', DEPS: 'Avaliação DEPS' }
@@ -1023,15 +1122,23 @@ const splitMultiple = (value: string | null): string[] => {
   const parts = (value || '').split(';').map((part) => part.trim()).filter(Boolean)
   return parts.length ? parts : ['']
 }
+const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+// O Prático às vezes devolve vários e-mails numa única linha, separados por ";" ou ",".
+const splitEmails = (value: string | null): string[] =>
+  (value || '').split(/[;,]+/).map((part) => part.trim()).filter((part) => emailPattern.test(part))
 
 function SellerForm({ onSubmit, initialRequest }: { onSubmit: (form: HTMLFormElement, contractFile: File | null) => Promise<string | null>; initialRequest?: Request | null }) {
   const isEditing = !!initialRequest
   const initialNames = splitMultiple(initialRequest?.contactName ?? null)
   const initialPhones = splitMultiple(initialRequest?.phone ?? null)
   const initialEmails = splitMultiple(initialRequest?.contactEmail ?? null)
-  const [cnpj, setCnpj] = useState(() => (initialRequest ? formatCnpj(initialRequest.cnpj) : ''))
+  const [cnpj, setCnpj] = useState(() => (initialRequest ? formatDocument(initialRequest.cnpj) : ''))
+  const [lookupMode, setLookupMode] = useState<'code' | 'document'>('code')
+  const [lookupValue, setLookupValue] = useState('')
+  const [lookupResults, setLookupResults] = useState<PraticoClient[]>([])
   const [lookupLoading, setLookupLoading] = useState(false)
   const [lookupError, setLookupError] = useState('')
+  const [lookupFilled, setLookupFilled] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState('')
   const [deliveryLocation, setDeliveryLocation] = useState(initialRequest?.deliveryLocation === 'Outro endereço' ? 'Outro endereço' : 'Endereço da empresa')
@@ -1046,35 +1153,85 @@ function SellerForm({ onSubmit, initialRequest }: { onSubmit: (form: HTMLFormEle
   const removePhoneField = (id: number) => setPhoneIds((ids) => ids.filter((x) => x !== id))
   const addEmailField = () => setEmailIds((ids) => [...ids, nextFieldId.current++])
   const removeEmailField = (id: number) => setEmailIds((ids) => ids.filter((x) => x !== id))
-  const companyNameRef = useRef<HTMLInputElement>(null)
-  const tradeNameRef = useRef<HTMLInputElement>(null)
-  const phoneRef = useRef<HTMLInputElement>(null)
-  const addressRef = useRef<HTMLInputElement>(null)
   const contractInputRef = useRef<HTMLInputElement>(null)
   const formRef = useRef<HTMLFormElement>(null)
+  const pendingEmailFill = useRef<string[] | null>(null)
 
-  const fillFromCnpj = async () => {
+  // Quando o Prático manda mais e-mails do que a ficha tem campos abertos, cria campos extras
+  // (o mesmo "+" que o vendedor usa manualmente) e preenche cada e-mail no seu próprio campo
+  // assim que eles existirem no DOM.
+  useEffect(() => {
+    if (!pendingEmailFill.current) return
+    const emails = pendingEmailFill.current
+    pendingEmailFill.current = null
+    const inputs = formRef.current?.querySelectorAll<HTMLInputElement>('[name="contactEmail"]')
+    inputs?.forEach((input, index) => { if (!input.value.trim() && emails[index]) input.value = emails[index] })
+  }, [emailIds])
+
+  // Preenche os campos com o cadastro do Prático. Campos de contato só são preenchidos
+  // quando ainda estão vazios, para não apagar o que o vendedor já digitou.
+  const applyPraticoClient = (client: PraticoClient) => {
+    const form = formRef.current
+    if (!form) return
+    const field = (name: string) => form.querySelector<HTMLInputElement>(`[name="${name}"]`)
+    const set = (name: string, value: string | null) => { const input = field(name); if (input) input.value = value ?? '' }
+    const setIfEmpty = (name: string, value: string | null) => { const input = field(name); if (input && !input.value.trim() && value) input.value = value }
+    set('clientCode', client.clientCode)
+    setCnpj(formatDocument(client.document ?? ''))
+    set('companyName', client.companyName)
+    set('tradeName', client.tradeName)
+    set('stateRegistration', client.stateRegistration)
+    set('address', client.address)
+    setIfEmpty('phone', client.phones[0] ?? null)
+
+    // O campo "contato" do cadastro no Prático às vezes vem com um e-mail digitado em vez de um
+    // nome — nesse caso é o e-mail da cobrança/financeiro (ex.: tesouraria@...), não o nome do
+    // contato nem mais um e-mail de contato, então vai direto para "E-mail financeiro".
+    const contactNameTrimmed = client.contactName?.trim() ?? ''
+    const contactNameIsEmail = emailPattern.test(contactNameTrimmed)
+    setIfEmpty('contactName', contactNameIsEmail ? null : client.contactName)
+    setIfEmpty('financeEmail', contactNameIsEmail ? contactNameTrimmed : null)
+
+    const emails = [...new Set(splitEmails(client.email))]
+    if (emails.length) {
+      const existingEmailInputs = Array.from(form.querySelectorAll<HTMLInputElement>('[name="contactEmail"]'))
+      existingEmailInputs.forEach((input, index) => { if (!input.value.trim() && emails[index]) input.value = emails[index] })
+      const missing = emails.length - existingEmailInputs.length
+      if (missing > 0) {
+        for (let i = 0; i < missing; i++) addEmailField()
+        pendingEmailFill.current = emails
+      }
+    }
+    setIfEmpty('invoiceEmail', emails[0] ?? null)
+    setLookupResults([]); setLookupError('')
+    setLookupFilled(`Dados do cliente ${client.clientCode} — ${client.companyName ?? ''} carregados do Prático. Confira antes de enviar.`)
+  }
+
+  const searchPratico = async () => {
     if (lookupLoading) return
-    const clean = cnpj.replace(/[^A-Z0-9]/gi, '')
-    if (clean.length !== 14) { setLookupError('Informe um CNPJ válido com 14 caracteres.'); return }
-    if (!/^\d{14}$/.test(clean)) { setLookupError('A busca automática ainda não é compatível com o novo CNPJ alfanumérico. Preencha os campos manualmente.'); return }
-    setLookupLoading(true); setLookupError('')
+    const value = lookupValue.trim()
+    if (lookupMode === 'code' && !/^\d+$/.test(value)) { setLookupError('Informe o código do cliente no Prático (somente números).'); return }
+    if (lookupMode === 'document') {
+      const length = value.replace(/[^A-Z0-9]/gi, '').length
+      if (length !== 11 && length !== 14) { setLookupError('Informe um CPF (11 dígitos) ou CNPJ (14 caracteres) válido.'); return }
+    }
+    setLookupLoading(true); setLookupError(''); setLookupFilled(''); setLookupResults([])
     try {
-      const response = await fetch(`https://brasilapi.com.br/api/cnpj/v1/${clean}`)
-      if (!response.ok) { setLookupError('CNPJ não encontrado na Receita Federal.'); return }
-      const data = await response.json()
-      if (companyNameRef.current) companyNameRef.current.value = data.razao_social || ''
-      if (tradeNameRef.current) tradeNameRef.current.value = data.nome_fantasia || ''
-      if (phoneRef.current) phoneRef.current.value = data.ddd_telefone_1 || ''
-      if (addressRef.current) addressRef.current.value = [data.logradouro, data.numero, data.bairro, data.municipio && data.uf ? `${data.municipio}/${data.uf}` : null].filter(Boolean).join(', ')
-      setLookupError('')
-    } catch { setLookupError('Não foi possível consultar a BrasilAPI.')
+      const response = await apiFetch(`/api/pratico/clients?by=${lookupMode}&value=${encodeURIComponent(value)}`)
+      const data = await response.json().catch(() => null)
+      if (!response.ok) { setLookupError(data?.message || (response.status === 404 ? 'Rota de busca no Prático não encontrada — reinicie a API do Sis-Cred para carregar a atualização.' : `Não foi possível consultar o Prático (HTTP ${response.status}).`)); return }
+      const clients = data as PraticoClient[]
+      if (!clients.length) setLookupError(lookupMode === 'code' ? 'Nenhum cliente encontrado no Prático com esse código.' : 'Nenhum cliente encontrado no Prático com esse CPF/CNPJ.')
+      else if (clients.length === 1) applyPraticoClient(clients[0])
+      else setLookupResults(clients)
+    } catch { setLookupError('Não foi possível consultar o Prático. Tente novamente ou preencha manualmente.')
     } finally { setLookupLoading(false) }
   }
 
   const resetForm = (form: HTMLFormElement) => {
     form.reset()
-    setCnpj(initialRequest ? formatCnpj(initialRequest.cnpj) : ''); setContractFile(null)
+    setCnpj(initialRequest ? formatDocument(initialRequest.cnpj) : ''); setContractFile(null)
+    setLookupValue(''); setLookupResults([]); setLookupError(''); setLookupFilled('')
     setDeliveryLocation(initialRequest?.deliveryLocation === 'Outro endereço' ? 'Outro endereço' : 'Endereço da empresa')
     setNameIds(initialNames.map((_, index) => index)); setPhoneIds(initialPhones.map((_, index) => index)); setEmailIds(initialEmails.map((_, index) => index))
   }
@@ -1093,18 +1250,30 @@ function SellerForm({ onSubmit, initialRequest }: { onSubmit: (form: HTMLFormEle
 
     <div className="form-section">
       <div className="form-section-head"><div className="form-section-icon"><Building2 size={16} /></div><div><h3>Identificação da empresa</h3><p>Dados cadastrais e localização do cliente</p></div></div>
-      <label>Código do cadastro (Prático)<span className="required-mark">*</span><input name="clientCode" required placeholder="Ex.: Cliente 258912" defaultValue={initialRequest?.clientCode ?? ''} /></label>
       <div className="form-grid">
-        <label>CNPJ<span className="required-mark">*</span><input name="cnpj" required placeholder="00.000.000/0000-00" maxLength={18} value={cnpj} onChange={(event) => setCnpj(formatCnpj(event.target.value))} /></label>
-        <label style={{ alignSelf: 'end' }}><button type="button" className="outline-btn" style={{ marginTop: 6 }} onClick={fillFromCnpj} disabled={lookupLoading}><Search size={15} /> {lookupLoading ? 'Consultando CNPJ...' : 'Preencher informações'}</button></label>
+        <label>Buscar cadastro no Prático por<select value={lookupMode} onChange={(event) => { setLookupMode(event.target.value as 'code' | 'document'); setLookupValue(''); setLookupError(''); setLookupResults([]) }}><option value="code">Código do cliente</option><option value="document">CNPJ ou CPF</option></select></label>
+        <label>{lookupMode === 'code' ? 'Código do cliente no Prático' : 'CNPJ ou CPF do cliente'}<input placeholder={lookupMode === 'code' ? 'Ex.: 258912' : '00.000.000/0000-00 ou 000.000.000-00'} inputMode={lookupMode === 'code' ? 'numeric' : undefined} maxLength={lookupMode === 'code' ? 9 : 18} value={lookupValue} onChange={(event) => setLookupValue(lookupMode === 'code' ? event.target.value.replace(/\D/g, '') : formatDocument(event.target.value))} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); searchPratico() } }} /></label>
       </div>
+      <button type="button" className="outline-btn" style={{ marginTop: 0, marginBottom: 13 }} onClick={searchPratico} disabled={lookupLoading}><Search size={15} /> {lookupLoading ? 'Consultando o Prático...' : 'Buscar no Prático e preencher'}</button>
       {lookupError && <div className="notice notice-error"><X size={17} /> {lookupError}</div>}
-      <label>Razão social<span className="required-mark">*</span><input name="companyName" required placeholder="Ex.: Nome da Empresa Ltda" ref={companyNameRef} defaultValue={initialRequest?.companyName ?? ''} /></label>
+      {lookupFilled && <div className="notice" style={{ margin: '0 0 15px' }}><Check size={17} /> {lookupFilled}</div>}
+      {lookupResults.length > 0 && <div style={{ marginBottom: 15 }}>
+        <p className="field-label" style={{ marginBottom: 6 }}>Mais de um cadastro encontrado — selecione o cliente:</p>
+        {lookupResults.map((client) => <button type="button" className="queue-item" style={{ width: '100%' }} key={`${client.companyCode}-${client.clientCode}`} onClick={() => applyPraticoClient(client)}>
+          <div className="case-avatar blue">{(client.companyName ?? '?').slice(0, 2)}</div>
+          <div><strong>{client.companyName ?? '—'}</strong><small>Código {client.clientCode}{client.companyCode != null ? ` · Empresa ${client.companyCode}` : ''} · {client.document ?? 'sem documento'}{client.address ? ` · ${client.address}` : ''}</small></div>
+        </button>)}
+      </div>}
       <div className="form-grid">
-        <label>Nome fantasia<input name="tradeName" placeholder="Nome comercial" ref={tradeNameRef} defaultValue={initialRequest?.tradeName ?? ''} /></label>
+        <label>Código do cadastro (Prático)<span className="required-mark">*</span><input name="clientCode" required placeholder="Ex.: 258912" defaultValue={initialRequest?.clientCode ?? ''} /></label>
+        <label>CNPJ ou CPF<span className="required-mark">*</span><input name="cnpj" required placeholder="00.000.000/0000-00" maxLength={18} value={cnpj} onChange={(event) => setCnpj(formatDocument(event.target.value))} /></label>
+      </div>
+      <label>Razão social<span className="required-mark">*</span><input name="companyName" required placeholder="Ex.: Nome da Empresa Ltda" defaultValue={initialRequest?.companyName ?? ''} /></label>
+      <div className="form-grid">
+        <label>Nome fantasia<input name="tradeName" placeholder="Nome comercial" defaultValue={initialRequest?.tradeName ?? ''} /></label>
         <label>Inscrição estadual<input name="stateRegistration" placeholder="Número da IE" defaultValue={initialRequest?.stateRegistration ?? ''} /></label>
       </div>
-      <label>Endereço completo<input name="address" placeholder="Rua, número, bairro, cidade e UF" ref={addressRef} defaultValue={initialRequest?.address ?? ''} /></label>
+      <label>Endereço completo<input name="address" placeholder="Rua, número, bairro, cidade e UF" defaultValue={initialRequest?.address ?? ''} /></label>
     </div>
 
     <div className="form-section">
@@ -1121,7 +1290,7 @@ function SellerForm({ onSubmit, initialRequest }: { onSubmit: (form: HTMLFormEle
       </div>)}
       <div className="field-label-row" style={{ marginTop: 12 }}><span className="field-label">Telefone<span className="required-mark">*</span></span><button type="button" className="add-field-btn" onClick={addPhoneField}><Plus size={14} /></button></div>
       {phoneIds.map((id, index) => <div className="dynamic-field-row" key={id}>
-        <input name="phone" required={index === 0} placeholder="(00) 0000-0000" ref={index === 0 ? phoneRef : undefined} defaultValue={initialPhones[index] ?? ''} />
+        <input name="phone" required={index === 0} placeholder="(00) 0000-0000" defaultValue={initialPhones[index] ?? ''} />
         {phoneIds.length > 1 && <button type="button" className="remove-field-btn" onClick={() => removePhoneField(id)}><X size={14} /></button>}
       </div>)}
       <div className="field-label-row" style={{ marginTop: 12 }}><span className="field-label">E-mail de contato<span className="required-mark">*</span></span><button type="button" className="add-field-btn" onClick={addEmailField}><Plus size={14} /></button></div>
@@ -1163,6 +1332,91 @@ function SellerForm({ onSubmit, initialRequest }: { onSubmit: (form: HTMLFormEle
 type DecisionDetail = { protocol: string; companyName: string; decision: 'APROVADA' | 'NEGADA'; approvedLimit: number | null; internalReason: string | null; clientMessage: string | null; decidedAt: string; managerName: string }
 const formatDateTime = (iso: string) => new Date(iso).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })
 
+// Cartão de dados do vendedor, reaproveitado na triagem da analista e nas duas telas da
+// gestão (fila e negadas) para manter a mesma organização visual nos três lugares.
+function SellerInfoCard({ request }: { request: Request }) {
+  return <section className="review-card">
+    <div className="form-section-head" style={{ marginBottom: 18 }}>
+      <div className="form-section-icon"><Users size={16} /></div>
+      <div><h2>Dados do vendedor</h2><p>Quem fez a solicitação</p></div>
+    </div>
+    <div className="data-grid" style={{ gridTemplateColumns: 'repeat(3, 1fr)', margin: 0 }}>
+      <div><span>Nome</span><strong>{request.sellerName || '—'}</strong></div>
+      <div><span>Código no Prático</span><strong>{request.sellerCode || '—'}</strong></div>
+      <div><span>Loja</span><strong>{request.sellerStore || '—'}</strong></div>
+      <div><span>Gerente responsável</span><strong>{request.sellerManagerName || '—'}</strong></div>
+      <div><span>E-mail</span><strong>{request.sellerEmail || '—'}</strong></div>
+      <div><span>WhatsApp</span><strong>{request.sellerWhatsapp ? <a href={whatsappLink(request.sellerWhatsapp)} target="_blank" rel="noreferrer">{request.sellerWhatsapp}</a> : '—'}</strong></div>
+    </div>
+  </section>
+}
+
+// Empresa, motivo do pedido, contato do cliente e perguntas obrigatórias — o conjunto de
+// informações que tanto a analista quanto a gestão precisam ler antes de decidir. Um cartão
+// por assunto, com ícone e título, em vez de uma lista corrida de campos.
+function RequestOverviewCards({ request }: { request: Request }) {
+  return <>
+    <section className="review-card" style={{ marginTop: 16 }}>
+      <div className="form-section-head" style={{ marginBottom: 18 }}>
+        <div className="form-section-icon"><Building2 size={16} /></div>
+        <div><h2>Identificação da empresa</h2><p>Dados cadastrais e localização do cliente</p></div>
+      </div>
+      <div className="data-grid" style={{ margin: 0 }}>
+        <div><span>Código do cadastro (Prático)</span><strong>{request.clientCode || '—'}</strong></div>
+        <div><span>CNPJ</span><strong>{request.cnpj || '—'}</strong></div>
+        <div><span>Razão social</span><strong>{request.companyName || '—'}</strong></div>
+        <div><span>Nome fantasia</span><strong>{request.tradeName || '—'}</strong></div>
+        <div><span>Inscrição estadual</span><strong>{request.stateRegistration || '—'}</strong></div>
+        <div><span>Endereço completo</span><strong>{request.address || '—'}</strong></div>
+      </div>
+    </section>
+
+    <section className="review-card" style={{ marginTop: 16 }}>
+      <div className="form-section-head" style={{ marginBottom: 14 }}>
+        <div className="form-section-icon"><MessageSquareText size={16} /></div>
+        <div><h2>O que o vendedor precisa</h2><p>Motivo da solicitação</p></div>
+      </div>
+      <p className="modal-copy" style={{ margin: 0 }}>{request.requestPurpose || '—'}</p>
+    </section>
+
+    <section className="review-card" style={{ marginTop: 16 }}>
+      <div className="form-section-head" style={{ marginBottom: 18 }}>
+        <div className="form-section-icon"><Phone size={16} /></div>
+        <div><h2>Contato do cliente ou responsável</h2><p>Quem confirma os dados no cliente</p></div>
+      </div>
+      <div className="data-grid" style={{ margin: 0 }}>
+        <div><span>Nome do contato</span><strong>{request.contactName || '—'}</strong></div>
+        <div><span>Telefone</span><strong>{request.phone || '—'}</strong></div>
+        <div><span>E-mail de contato</span><strong>{request.contactEmail || '—'}</strong></div>
+        <div><span>E-mail para NFe e avisos de vencimento</span><strong>{request.invoiceEmail || '—'}</strong></div>
+        <div><span>E-mail financeiro</span><strong>{request.financeEmail || '—'}</strong></div>
+      </div>
+    </section>
+
+    <section className="review-card" style={{ marginTop: 16 }}>
+      <div className="form-section-head" style={{ marginBottom: 18 }}>
+        <div className="form-section-icon"><ClipboardList size={16} /></div>
+        <div><h2>Perguntas obrigatórias</h2><p>Ajudam a validar a operação</p></div>
+      </div>
+      <div className="data-grid" style={{ margin: 0 }}>
+        <div><span>Como o cliente chegou até você?</span><strong>{request.origin || '—'}</strong></div>
+        <div><span>Forma de autorização de compra?</span><strong>{request.purchaseAuthorization || '—'}</strong></div>
+        <div><span>Tipo de entrega?</span><strong>{request.deliveryType || '—'}</strong></div>
+        <div><span>Local da entrega</span><strong>{request.deliveryLocation || '—'}</strong></div>
+        {request.deliveryAddress && <div><span>Endereço de entrega</span><strong>{request.deliveryAddress}</strong></div>}
+      </div>
+    </section>
+
+    {request.sellerNotes && <section className="review-card" style={{ marginTop: 16 }}>
+      <div className="form-section-head" style={{ marginBottom: 14 }}>
+        <div className="form-section-icon"><Paperclip size={16} /></div>
+        <div><h2>Observações do vendedor</h2><p>Informações adicionais registradas no envio</p></div>
+      </div>
+      <p className="modal-copy" style={{ margin: 0 }}>{request.sellerNotes}</p>
+    </section>}
+  </>
+}
+
 function AnalystView({ requests, selected, setSelected, onSend, onReturned }: { requests: Request[]; selected: Request; setSelected: (item: Request) => void; onSend: () => void; onReturned: () => void }) {
   const serasaInputRef = useRef<HTMLInputElement>(null)
   const depsInputRef = useRef<HTMLInputElement>(null)
@@ -1197,11 +1451,56 @@ function AnalystView({ requests, selected, setSelected, onSend, onReturned }: { 
   }
   const bothUploaded = !!serasaDoc && !!depsDoc
 
-  return <><PageHeader eyebrow="ÁREA DA ANALISTA" title="Triagem e montagem do dossiê" subtitle="Receba os cadastros, anexe os relatórios e envie uma análise completa para a gestão." /><div className="analyst-layout"><div className="queue-card"><div className="queue-header"><div><h2>Fila de solicitações</h2><p>{requests.length} cadastro(s) aguardando tratamento</p></div><div className="search"><Search size={16} /><input placeholder="Buscar cliente" /></div></div>{requests.length ? requests.map((item) => <button className={selected.id === item.id ? 'queue-item selected' : 'queue-item'} key={item.id} onClick={() => setSelected(item)}><div className="case-avatar blue">{item.companyName.slice(0, 2)}</div><div><strong>{item.companyName}</strong><small>{item.cnpj}</small></div><span className="queue-time">{statusLabel[item.status]}</span></button>) : <p className="subheading" style={{ padding: '17px' }}>Nenhum cadastro na fila.</p>}</div><div className="dossier-panel">{!selected.id ? <div style={{ padding: '60px 30px', textAlign: 'center' }}><FileCheck2 size={34} style={{ color: '#b8cdfb', marginBottom: 14 }} /><p className="subheading">Selecione um cliente na fila ao lado para ver os dados do cadastro.</p></div> : <><div className="dossier-head"><div><p className="eyebrow">DOSSIÊ {selected.protocol}</p><h2>{selected.companyName}</h2><span>Código Prático: {selected.clientCode} · {selected.cnpj} · solicitado por {selected.sellerName}</span></div><div style={{ display: 'flex', alignItems: 'center', gap: 10 }}><button type="button" className="deny-btn" style={{ padding: '9px 14px' }} onClick={() => setShowReturnModal(true)}><X size={15} /> Recusar cadastro</button><span className="status blue"><i></i>{statusLabel[selected.status]}</span></div></div>{showReturnModal && <ReturnToSellerModal item={selected} onClose={() => setShowReturnModal(false)} onReturned={(emailSent) => { setShowReturnModal(false); onReturned(); pushToast('success', emailSent ? 'Cadastro devolvido ao vendedor. Ele foi avisado por e-mail.' : 'Cadastro devolvido ao vendedor.') }} />}<p className="eyebrow">DADOS DO VENDEDOR</p><div className="data-grid"><div><span>Nome</span><strong>{selected.sellerName || '—'}</strong></div><div><span>Código no Prático</span><strong>{selected.sellerCode || '—'}</strong></div><div><span>Loja</span><strong>{selected.sellerStore || '—'}</strong></div><div><span>Gerente responsável</span><strong>{selected.sellerManagerName || '—'}</strong></div><div><span>E-mail</span><strong>{selected.sellerEmail || '—'}</strong></div><div><span>WhatsApp</span><strong>{selected.sellerWhatsapp ? <a href={whatsappLink(selected.sellerWhatsapp)} target="_blank" rel="noreferrer">{selected.sellerWhatsapp}</a> : '—'}</strong></div></div><p className="eyebrow" style={{ marginTop: 18 }}>IDENTIFICAÇÃO DA EMPRESA</p><div className="data-grid"><div><span>Código do cadastro (Prático)</span><strong>{selected.clientCode || '—'}</strong></div><div><span>CNPJ</span><strong>{selected.cnpj || '—'}</strong></div><div><span>Razão social</span><strong>{selected.companyName || '—'}</strong></div><div><span>Nome fantasia</span><strong>{selected.tradeName || '—'}</strong></div><div><span>Inscrição estadual</span><strong>{selected.stateRegistration || '—'}</strong></div><div><span>Endereço completo</span><strong>{selected.address || '—'}</strong></div></div>
-<p className="eyebrow" style={{ marginTop: 18 }}>O QUE O VENDEDOR PRECISA</p><p className="modal-copy" style={{ margin: 0 }}>{selected.requestPurpose || '—'}</p>
-<p className="eyebrow" style={{ marginTop: 18 }}>CONTATO DO CLIENTE OU RESPONSÁVEL</p><div className="data-grid"><div><span>Nome do contato</span><strong>{selected.contactName || '—'}</strong></div><div><span>Telefone</span><strong>{selected.phone || '—'}</strong></div><div><span>E-mail de contato</span><strong>{selected.contactEmail || '—'}</strong></div><div><span>E-mail para NFe e avisos de vencimento</span><strong>{selected.invoiceEmail || '—'}</strong></div><div><span>E-mail financeiro</span><strong>{selected.financeEmail || '—'}</strong></div></div>
-<p className="eyebrow" style={{ marginTop: 18 }}>PERGUNTAS OBRIGATÓRIAS</p><div className="data-grid"><div><span>Como o cliente chegou até você?</span><strong>{selected.origin || '—'}</strong></div><div><span>Forma de autorização de compra?</span><strong>{selected.purchaseAuthorization || '—'}</strong></div><div><span>Tipo de entrega?</span><strong>{selected.deliveryType || '—'}</strong></div><div><span>Local da entrega</span><strong>{selected.deliveryLocation || '—'}</strong></div>{selected.deliveryAddress && <div><span>Endereço de entrega</span><strong>{selected.deliveryAddress}</strong></div>}</div>
-{selected.sellerNotes && <><p className="eyebrow" style={{ marginTop: 18 }}>OBSERVAÇÕES DO VENDEDOR</p><p className="modal-copy" style={{ margin: 0 }}>{selected.sellerNotes}</p></>}<div className="report-section"><div className="report-title"><div><FileCheck2 size={18} /><div><h3>Documentos enviados pelo vendedor</h3><p>Contrato social ou certificado de empresário individual.</p></div></div></div><div className="report-files"><ReportFile icon="deps" name="Contrato social / Certificado MEI" detail={contractDoc ? `${contractDoc.originalName} · anexado pelo vendedor` : 'Não anexado pelo vendedor'} complete={!!contractDoc} onClick={() => contractDoc && viewDocument(contractDoc.id)} /></div></div><div className="report-section"><div className="report-title"><div><FileCheck2 size={18} /><div><h3>Relatórios de crédito</h3><p>Clique em cada relatório abaixo para escolher o PDF correspondente.</p></div></div></div>{uploadError && <div className="notice notice-error"><X size={17} /> {uploadError}</div>}<div className="report-files"><ReportFile icon="serasa" name="Consulta Serasa" detail={serasaDoc ? `${serasaDoc.originalName} · PDF original anexado` : uploadingType === 'SERASA' ? 'Enviando...' : 'Clique para escolher o PDF'} complete={!!serasaDoc} onClick={() => (serasaDoc ? viewDocument(serasaDoc.id) : serasaInputRef.current?.click())} onRemove={serasaDoc ? () => handleRemove('SERASA', serasaDoc.id) : undefined} /><ReportFile icon="deps" name="Avaliação DEPS" detail={depsDoc ? `${depsDoc.originalName} · PDF original anexado` : uploadingType === 'DEPS' ? 'Enviando...' : 'Clique para escolher o PDF'} complete={!!depsDoc} onClick={() => (depsDoc ? viewDocument(depsDoc.id) : depsInputRef.current?.click())} onRemove={depsDoc ? () => handleRemove('DEPS', depsDoc.id) : undefined} /></div><input ref={serasaInputRef} type="file" accept="application/pdf" style={{ display: 'none' }} onChange={(event) => handleUpload('SERASA', event.target.files?.[0])} /><input ref={depsInputRef} type="file" accept="application/pdf" style={{ display: 'none' }} onChange={(event) => handleUpload('DEPS', event.target.files?.[0])} /></div>{bothUploaded && <div className="extracted"><div className="extracted-title"><Check size={16} /> Informações extraídas dos relatórios</div>{depsDoc?.extractedData ? <div className="data-grid compact"><div><span>Classificação DEPS</span><strong>{depsDoc.extractedData.classification}</strong></div><div><span>Limite sugerido</span><strong>{money(depsDoc.extractedData.suggestedLimit)}</strong></div><div><span>Risco</span><strong className="danger-text">{depsDoc.extractedData.risk || '—'}</strong></div><div><span>Protestos</span><strong className="danger-text">{depsDoc.extractedData.protests ? `${depsDoc.extractedData.protests.count} · ${money(depsDoc.extractedData.protests.value)}` : '—'}</strong></div><div><span>PEFIN</span><strong className="warning-text">{depsDoc.extractedData.pefin ? `${depsDoc.extractedData.pefin.count} · ${money(depsDoc.extractedData.pefin.value)}` : '—'}</strong></div><div><span>Histórico pontual</span><strong>{depsDoc.extractedData.paymentHistoryPercent != null ? `${depsDoc.extractedData.paymentHistoryPercent.toLocaleString('pt-BR')}%` : '—'}</strong></div></div> : <p className="modal-copy" style={{ margin: 0 }}>Não foi possível extrair os dados automaticamente deste PDF. Confira o arquivo original de Avaliação DEPS.</p>}</div>}<button className="primary-btn send-management" disabled={!bothUploaded} onClick={onSend}><Send size={17} /> Enviar dossiê para gestão</button></>}</div></div></>
+  return <>
+    <PageHeader eyebrow="ÁREA DA ANALISTA" title="Triagem e montagem do dossiê" subtitle="Receba os cadastros, anexe os relatórios e envie uma análise completa para a gestão." />
+    <div className="analyst-layout">
+      <div className="queue-card">
+        <div className="queue-header">
+          <div><h2>Fila de solicitações</h2><p>{requests.length} cadastro(s) aguardando tratamento</p></div>
+          <div className="search"><Search size={16} /><input placeholder="Buscar cliente" /></div>
+        </div>
+        {requests.length ? requests.map((item) => <button className={selected.id === item.id ? 'queue-item selected' : 'queue-item'} key={item.id} onClick={() => setSelected(item)}><div className="case-avatar blue">{item.companyName.slice(0, 2)}</div><div><strong>{item.companyName}</strong><small>{item.cnpj}</small></div><span className="queue-time">{statusLabel[item.status]}</span></button>) : <p className="subheading" style={{ padding: '17px' }}>Nenhum cadastro na fila.</p>}
+      </div>
+      <div className="dossier-panel">{!selected.id ? <div style={{ padding: '60px 30px', textAlign: 'center' }}><FileCheck2 size={34} style={{ color: '#b8cdfb', marginBottom: 14 }} /><p className="subheading">Selecione um cliente na fila ao lado para ver os dados do cadastro.</p></div> : <>
+        <div className="dossier-head">
+          <div><p className="eyebrow">DOSSIÊ {selected.protocol}</p><h2>{selected.companyName}</h2><span>Código Prático: {selected.clientCode} · {selected.cnpj} · solicitado por {selected.sellerName}</span></div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}><button type="button" className="deny-btn" style={{ padding: '9px 14px' }} onClick={() => setShowReturnModal(true)}><X size={15} /> Recusar cadastro</button><span className="status blue"><i></i>{statusLabel[selected.status]}</span></div>
+        </div>
+        {showReturnModal && <ReturnToSellerModal item={selected} onClose={() => setShowReturnModal(false)} onReturned={(emailSent) => { setShowReturnModal(false); onReturned(); pushToast('success', emailSent ? 'Cadastro devolvido ao vendedor. Ele foi avisado por e-mail.' : 'Cadastro devolvido ao vendedor.') }} />}
+
+        <div style={{ marginTop: 18 }}><SellerInfoCard request={selected} /></div>
+        <RequestOverviewCards request={selected} />
+
+        <section className="review-card" style={{ marginTop: 16 }}>
+          <div className="form-section-head" style={{ marginBottom: 18 }}>
+            <div className="form-section-icon"><FileCheck2 size={16} /></div>
+            <div><h2>Documentos enviados pelo vendedor</h2><p>Contrato social ou certificado de empresário individual</p></div>
+          </div>
+          <div className="report-files"><ReportFile icon="deps" name="Contrato social / Certificado MEI" detail={contractDoc ? `${contractDoc.originalName} · anexado pelo vendedor` : 'Não anexado pelo vendedor'} complete={!!contractDoc} onClick={() => contractDoc && viewDocument(contractDoc.id)} /></div>
+        </section>
+
+        <section className="review-card" style={{ marginTop: 16 }}>
+          <div className="form-section-head" style={{ marginBottom: 18 }}>
+            <div className="form-section-icon"><FileText size={16} /></div>
+            <div><h2>Relatórios de crédito</h2><p>Clique em cada relatório abaixo para escolher o PDF correspondente</p></div>
+          </div>
+          {uploadError && <div className="notice notice-error"><X size={17} /> {uploadError}</div>}
+          <div className="report-files">
+            <ReportFile icon="serasa" name="Consulta Serasa" detail={serasaDoc ? `${serasaDoc.originalName} · PDF original anexado` : uploadingType === 'SERASA' ? 'Enviando...' : 'Clique para escolher o PDF'} complete={!!serasaDoc} onClick={() => (serasaDoc ? viewDocument(serasaDoc.id) : serasaInputRef.current?.click())} onRemove={serasaDoc ? () => handleRemove('SERASA', serasaDoc.id) : undefined} />
+            <ReportFile icon="deps" name="Avaliação DEPS" detail={depsDoc ? `${depsDoc.originalName} · PDF original anexado` : uploadingType === 'DEPS' ? 'Enviando...' : 'Clique para escolher o PDF'} complete={!!depsDoc} onClick={() => (depsDoc ? viewDocument(depsDoc.id) : depsInputRef.current?.click())} onRemove={depsDoc ? () => handleRemove('DEPS', depsDoc.id) : undefined} />
+          </div>
+          <input ref={serasaInputRef} type="file" accept="application/pdf" style={{ display: 'none' }} onChange={(event) => handleUpload('SERASA', event.target.files?.[0])} />
+          <input ref={depsInputRef} type="file" accept="application/pdf" style={{ display: 'none' }} onChange={(event) => handleUpload('DEPS', event.target.files?.[0])} />
+          {bothUploaded && <div className="extracted">
+            <div className="extracted-title"><Check size={16} /> Informações extraídas dos relatórios</div>
+            {depsDoc?.extractedData ? <div className="data-grid compact"><div><span>Classificação DEPS</span><strong>{depsDoc.extractedData.classification}</strong></div><div><span>Limite sugerido</span><strong>{money(depsDoc.extractedData.suggestedLimit)}</strong></div><div><span>Risco</span><strong className="danger-text">{depsDoc.extractedData.risk || '—'}</strong></div><div><span>Protestos</span><strong className="danger-text">{depsDoc.extractedData.protests ? `${depsDoc.extractedData.protests.count} · ${money(depsDoc.extractedData.protests.value)}` : '—'}</strong></div><div><span>PEFIN</span><strong className="warning-text">{depsDoc.extractedData.pefin ? `${depsDoc.extractedData.pefin.count} · ${money(depsDoc.extractedData.pefin.value)}` : '—'}</strong></div><div><span>Histórico pontual</span><strong>{depsDoc.extractedData.paymentHistoryPercent != null ? `${depsDoc.extractedData.paymentHistoryPercent.toLocaleString('pt-BR')}%` : '—'}</strong></div></div> : <p className="modal-copy" style={{ margin: 0 }}>Não foi possível extrair os dados automaticamente deste PDF. Confira o arquivo original de Avaliação DEPS.</p>}
+          </div>}
+        </section>
+
+        <button className="primary-btn send-management" disabled={!bothUploaded} onClick={onSend}><Send size={17} /> Enviar dossiê para gestão</button>
+      </>}</div>
+    </div>
+  </>
 }
 function ReportFile({ icon, name, detail, complete, onClick, onRemove }: { icon: string; name: string; detail: string; complete: boolean; onClick: () => void; onRemove?: () => void }) {
   if (!complete) return <button type="button" className="report-file" onClick={onClick} style={{ width: '100%', textAlign: 'left', font: 'inherit', cursor: 'pointer' }}><div className={'report-icon ' + icon}><FileText size={18} /></div><div><strong>{name}</strong><small>{detail}</small></div><UploadCloud size={16} /></button>
@@ -1393,8 +1692,21 @@ function ManagementView({ requests, deniedItems, onReloadRequests, selected, set
       <div className="dossier-panel">{!isDenied ? <div style={{ padding: '60px 30px', textAlign: 'center' }}><ShieldCheck size={34} style={{ color: '#b8cdfb', marginBottom: 14 }} /><p className="subheading">Selecione uma solicitação negada ao lado para ver o dossiê e reabrir a decisão.</p></div> : <>
         <div className="dossier-head"><div><p className="eyebrow">SOLICITAÇÃO {selected.protocol}</p><h2>{selected.companyName}</h2><div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}><span className="user-role">Código Prático: {selected.clientCode}</span><span className="user-role">CNPJ: {selected.cnpj}</span></div></div></div>
         {decisionDetail && <div className="notice notice-error" style={{ marginBottom: 4 }}><X size={17} /> Negada por {decisionDetail.managerName} em {formatDateTime(decisionDetail.decidedAt)}{decisionDetail.internalReason ? ` — motivo registrado: "${decisionDetail.internalReason}"` : ''}</div>}
-        <section className="review-card"><div className="card-heading"><div><h2>Dados do vendedor</h2><p>Para identificar quem fez a solicitação.</p></div></div><div className="data-grid" style={{ gridTemplateColumns: '1fr 1fr 1fr' }}><div><span>Nome</span><strong>{selected.sellerName || '—'}</strong></div><div><span>Código no Prático</span><strong>{selected.sellerCode || '—'}</strong></div><div><span>Loja</span><strong>{selected.sellerStore || '—'}</strong></div><div><span>Gerente responsável</span><strong>{selected.sellerManagerName || '—'}</strong></div><div><span>E-mail</span><strong>{selected.sellerEmail || '—'}</strong></div><div><span>WhatsApp</span><strong>{selected.sellerWhatsapp ? <a href={whatsappLink(selected.sellerWhatsapp)} target="_blank" rel="noreferrer">{selected.sellerWhatsapp}</a> : '—'}</strong></div></div></section>
-        <section className="review-card" style={{ marginTop: 16 }}><div className="card-heading"><div><h2>Resumo da análise</h2><p>Dados extraídos pela analista a partir do Serasa e DEPS.</p></div><span className="tag">Dossiê completo</span></div>{depsDoc && !deps && <div className="notice notice-error"><X size={17} /> Não foi possível extrair os dados automaticamente do PDF de Avaliação DEPS. Confira o arquivo original.</div>}<div className="score-row"><div className="score-main"><span>Classificação DEPS</span><strong>{deps?.classification ?? '—'}</strong><small>Limite sugerido: {deps ? money(deps.suggestedLimit) : '—'}</small></div><div className="score-item"><span>Pontuação positiva</span><strong className="success-text">{deps ? `${deps.positivePercent.toLocaleString('pt-BR')}%` : '—'}</strong></div><div className="score-item"><span>Pontuação negativa</span><strong className="danger-text">{deps ? `${deps.negativePercent.toLocaleString('pt-BR')}%` : '—'}</strong></div><div className="score-item"><span>Risco</span><strong className="danger-text">{deps?.risk ?? '—'}</strong></div></div><div className="risk-table"><div><span>Protestos</span><strong>{deps?.protests ? `${deps.protests.count} ocorrências · ${money(deps.protests.value)}` : '—'}</strong><b className="danger-text">Atenção</b></div><div><span>PEFIN</span><strong>{deps?.pefin ? `${deps.pefin.count} ocorrências · ${money(deps.pefin.value)}` : '—'}</strong><b className="warning-text">Verificar</b></div><div><span>Histórico de pagamento</span><strong>{deps?.paymentHistoryPercent != null ? `${deps.paymentHistoryPercent.toLocaleString('pt-BR')}% pontual` : '—'}</strong><b className="success-text">Regular</b></div><div><span>Consultas recentes</span><strong>{deps?.consultationsCount != null ? `${deps.consultationsCount} registrada(s)` : '—'}</strong><b>Normal</b></div></div><div className="original-files">{serasaDoc ? <span><FileText size={15} /> {serasaDoc.originalName} <a href="#" onClick={(event) => { event.preventDefault(); viewDocument(serasaDoc.id) }}>Visualizar</a></span> : <span><FileText size={15} /> Consulta Serasa <em style={{ color: '#b3bcc7', fontStyle: 'normal' }}>não anexada</em></span>}{depsDoc ? <span><FileText size={15} /> {depsDoc.originalName} <a href="#" onClick={(event) => { event.preventDefault(); viewDocument(depsDoc.id) }}>Visualizar</a></span> : <span><FileText size={15} /> Avaliação DEPS <em style={{ color: '#b3bcc7', fontStyle: 'normal' }}>não anexada</em></span>}</div></section>
+
+        <div style={{ marginTop: 4 }}><SellerInfoCard request={selected} /></div>
+        <RequestOverviewCards request={selected} />
+
+        <section className="review-card" style={{ marginTop: 16 }}>
+          <div className="form-section-head" style={{ marginBottom: 4, justifyContent: 'space-between' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}><div className="form-section-icon"><ClipboardCheck size={16} /></div><div><h2>Resumo da análise</h2><p>Dados extraídos pela analista a partir do Serasa e DEPS</p></div></div>
+            <span className="tag">Dossiê completo</span>
+          </div>
+          {depsDoc && !deps && <div className="notice notice-error"><X size={17} /> Não foi possível extrair os dados automaticamente do PDF de Avaliação DEPS. Confira o arquivo original.</div>}
+          <div className="score-row"><div className="score-main"><span>Classificação DEPS</span><strong>{deps?.classification ?? '—'}</strong><small>Limite sugerido: {deps ? money(deps.suggestedLimit) : '—'}</small></div><div className="score-item"><span>Pontuação positiva</span><strong className="success-text">{deps ? `${deps.positivePercent.toLocaleString('pt-BR')}%` : '—'}</strong></div><div className="score-item"><span>Pontuação negativa</span><strong className="danger-text">{deps ? `${deps.negativePercent.toLocaleString('pt-BR')}%` : '—'}</strong></div><div className="score-item"><span>Risco</span><strong className="danger-text">{deps?.risk ?? '—'}</strong></div></div>
+          <div className="risk-table"><div><span>Protestos</span><strong>{deps?.protests ? `${deps.protests.count} ocorrências · ${money(deps.protests.value)}` : '—'}</strong><b className="danger-text">Atenção</b></div><div><span>PEFIN</span><strong>{deps?.pefin ? `${deps.pefin.count} ocorrências · ${money(deps.pefin.value)}` : '—'}</strong><b className="warning-text">Verificar</b></div><div><span>Histórico de pagamento</span><strong>{deps?.paymentHistoryPercent != null ? `${deps.paymentHistoryPercent.toLocaleString('pt-BR')}% pontual` : '—'}</strong><b className="success-text">Regular</b></div><div><span>Consultas recentes</span><strong>{deps?.consultationsCount != null ? `${deps.consultationsCount} registrada(s)` : '—'}</strong><b>Normal</b></div></div>
+          <div className="original-files">{serasaDoc ? <span><FileText size={15} /> {serasaDoc.originalName} <a href="#" onClick={(event) => { event.preventDefault(); viewDocument(serasaDoc.id) }}>Visualizar</a></span> : <span><FileText size={15} /> Consulta Serasa <em style={{ color: '#b3bcc7', fontStyle: 'normal' }}>não anexada</em></span>}{depsDoc ? <span><FileText size={15} /> {depsDoc.originalName} <a href="#" onClick={(event) => { event.preventDefault(); viewDocument(depsDoc.id) }}>Visualizar</a></span> : <span><FileText size={15} /> Avaliação DEPS <em style={{ color: '#b3bcc7', fontStyle: 'normal' }}>não anexada</em></span>}</div>
+        </section>
+
         <section className="decision-card" style={{ marginTop: 16 }}><p className="eyebrow">REABERTURA DA DECISÃO</p><h2>Novo limite e justificativa</h2><label>Novo limite aprovado<input type="number" min="0.01" step="0.01" value={approvedLimit} onChange={(event) => setApprovedLimit(event.target.value)} /></label><label>Justificativa da reabertura<textarea rows={3} value={internalReason} onChange={(event) => setInternalReason(event.target.value)} placeholder="Motivo da gestão para reverter a negativa"></textarea></label><label>Mensagem para o vendedor<textarea rows={3} value={clientMessage} onChange={(event) => setClientMessage(event.target.value)} placeholder="Explicação que o vendedor verá em Minhas solicitações"></textarea></label><label>E-mail para envio do resultado<input type="email" value={recipientEmail} onChange={(event) => setRecipientEmail(event.target.value)} placeholder="email@empresa.com.br" /></label>{reopenError && <div className="notice notice-error"><X size={17} /> {reopenError}</div>}<div className="decision-buttons" style={{ gridTemplateColumns: '1fr' }}><button className="approve-btn" disabled={reopenSubmitting} onClick={submitReopen}><RotateCcw size={17} /> {reopenSubmitting ? 'Reabrindo...' : 'Reabrir e aprovar'}</button></div><small className="decision-note"><Bell size={13} /> A justificativa fica registrada no histórico da solicitação e um e-mail com o resultado será enviado ao endereço confirmado acima.</small></section>
       </>}</div>
     </div> : <div className="analyst-layout">
@@ -1404,8 +1716,21 @@ function ManagementView({ requests, deniedItems, onReloadRequests, selected, set
       </div>
       <div className="dossier-panel">{!isQueued ? <div style={{ padding: '60px 30px', textAlign: 'center' }}><ShieldCheck size={34} style={{ color: '#b8cdfb', marginBottom: 14 }} /><p className="subheading">Selecione uma solicitação na fila ao lado para revisar e decidir.</p></div> : <>
         <div className="dossier-head"><div><p className="eyebrow">SOLICITAÇÃO {selected.protocol}</p><h2>{selected.companyName}</h2><div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}><span className="user-role">Código Prático: {selected.clientCode}</span><span className="user-role">CNPJ: {selected.cnpj}</span></div></div></div>
-        <section className="review-card"><div className="card-heading"><div><h2>Dados do vendedor</h2><p>Para identificar quem fez a solicitação.</p></div></div><div className="data-grid" style={{ gridTemplateColumns: '1fr 1fr 1fr' }}><div><span>Nome</span><strong>{selected.sellerName || '—'}</strong></div><div><span>Código no Prático</span><strong>{selected.sellerCode || '—'}</strong></div><div><span>Loja</span><strong>{selected.sellerStore || '—'}</strong></div><div><span>Gerente responsável</span><strong>{selected.sellerManagerName || '—'}</strong></div><div><span>E-mail</span><strong>{selected.sellerEmail || '—'}</strong></div><div><span>WhatsApp</span><strong>{selected.sellerWhatsapp ? <a href={whatsappLink(selected.sellerWhatsapp)} target="_blank" rel="noreferrer">{selected.sellerWhatsapp}</a> : '—'}</strong></div></div></section>
-        <section className="review-card" style={{ marginTop: 16 }}><div className="card-heading"><div><h2>Resumo da análise</h2><p>Dados extraídos pela analista a partir do Serasa e DEPS.</p></div><span className="tag">Dossiê completo</span></div>{depsDoc && !deps && <div className="notice notice-error"><X size={17} /> Não foi possível extrair os dados automaticamente do PDF de Avaliação DEPS. Confira o arquivo original.</div>}<div className="score-row"><div className="score-main"><span>Classificação DEPS</span><strong>{deps?.classification ?? '—'}</strong><small>Limite sugerido: {deps ? money(deps.suggestedLimit) : '—'}</small></div><div className="score-item"><span>Pontuação positiva</span><strong className="success-text">{deps ? `${deps.positivePercent.toLocaleString('pt-BR')}%` : '—'}</strong></div><div className="score-item"><span>Pontuação negativa</span><strong className="danger-text">{deps ? `${deps.negativePercent.toLocaleString('pt-BR')}%` : '—'}</strong></div><div className="score-item"><span>Risco</span><strong className="danger-text">{deps?.risk ?? '—'}</strong></div></div><div className="risk-table"><div><span>Protestos</span><strong>{deps?.protests ? `${deps.protests.count} ocorrências · ${money(deps.protests.value)}` : '—'}</strong><b className="danger-text">Atenção</b></div><div><span>PEFIN</span><strong>{deps?.pefin ? `${deps.pefin.count} ocorrências · ${money(deps.pefin.value)}` : '—'}</strong><b className="warning-text">Verificar</b></div><div><span>Histórico de pagamento</span><strong>{deps?.paymentHistoryPercent != null ? `${deps.paymentHistoryPercent.toLocaleString('pt-BR')}% pontual` : '—'}</strong><b className="success-text">Regular</b></div><div><span>Consultas recentes</span><strong>{deps?.consultationsCount != null ? `${deps.consultationsCount} registrada(s)` : '—'}</strong><b>Normal</b></div></div><div className="original-files">{serasaDoc ? <span><FileText size={15} /> {serasaDoc.originalName} <a href="#" onClick={(event) => { event.preventDefault(); viewDocument(serasaDoc.id) }}>Visualizar</a></span> : <span><FileText size={15} /> Consulta Serasa <em style={{ color: '#b3bcc7', fontStyle: 'normal' }}>não anexada</em></span>}{depsDoc ? <span><FileText size={15} /> {depsDoc.originalName} <a href="#" onClick={(event) => { event.preventDefault(); viewDocument(depsDoc.id) }}>Visualizar</a></span> : <span><FileText size={15} /> Avaliação DEPS <em style={{ color: '#b3bcc7', fontStyle: 'normal' }}>não anexada</em></span>}</div></section>
+
+        <div style={{ marginTop: 4 }}><SellerInfoCard request={selected} /></div>
+        <RequestOverviewCards request={selected} />
+
+        <section className="review-card" style={{ marginTop: 16 }}>
+          <div className="form-section-head" style={{ marginBottom: 4, justifyContent: 'space-between' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}><div className="form-section-icon"><ClipboardCheck size={16} /></div><div><h2>Resumo da análise</h2><p>Dados extraídos pela analista a partir do Serasa e DEPS</p></div></div>
+            <span className="tag">Dossiê completo</span>
+          </div>
+          {depsDoc && !deps && <div className="notice notice-error"><X size={17} /> Não foi possível extrair os dados automaticamente do PDF de Avaliação DEPS. Confira o arquivo original.</div>}
+          <div className="score-row"><div className="score-main"><span>Classificação DEPS</span><strong>{deps?.classification ?? '—'}</strong><small>Limite sugerido: {deps ? money(deps.suggestedLimit) : '—'}</small></div><div className="score-item"><span>Pontuação positiva</span><strong className="success-text">{deps ? `${deps.positivePercent.toLocaleString('pt-BR')}%` : '—'}</strong></div><div className="score-item"><span>Pontuação negativa</span><strong className="danger-text">{deps ? `${deps.negativePercent.toLocaleString('pt-BR')}%` : '—'}</strong></div><div className="score-item"><span>Risco</span><strong className="danger-text">{deps?.risk ?? '—'}</strong></div></div>
+          <div className="risk-table"><div><span>Protestos</span><strong>{deps?.protests ? `${deps.protests.count} ocorrências · ${money(deps.protests.value)}` : '—'}</strong><b className="danger-text">Atenção</b></div><div><span>PEFIN</span><strong>{deps?.pefin ? `${deps.pefin.count} ocorrências · ${money(deps.pefin.value)}` : '—'}</strong><b className="warning-text">Verificar</b></div><div><span>Histórico de pagamento</span><strong>{deps?.paymentHistoryPercent != null ? `${deps.paymentHistoryPercent.toLocaleString('pt-BR')}% pontual` : '—'}</strong><b className="success-text">Regular</b></div><div><span>Consultas recentes</span><strong>{deps?.consultationsCount != null ? `${deps.consultationsCount} registrada(s)` : '—'}</strong><b>Normal</b></div></div>
+          <div className="original-files">{serasaDoc ? <span><FileText size={15} /> {serasaDoc.originalName} <a href="#" onClick={(event) => { event.preventDefault(); viewDocument(serasaDoc.id) }}>Visualizar</a></span> : <span><FileText size={15} /> Consulta Serasa <em style={{ color: '#b3bcc7', fontStyle: 'normal' }}>não anexada</em></span>}{depsDoc ? <span><FileText size={15} /> {depsDoc.originalName} <a href="#" onClick={(event) => { event.preventDefault(); viewDocument(depsDoc.id) }}>Visualizar</a></span> : <span><FileText size={15} /> Avaliação DEPS <em style={{ color: '#b3bcc7', fontStyle: 'normal' }}>não anexada</em></span>}</div>
+        </section>
+
         <section className="decision-card" style={{ marginTop: 16 }}><p className="eyebrow">PARECER FINAL</p><h2>Qual limite deve ser liberado?</h2><label>Limite aprovado<input type="number" min="0" step="0.01" value={approvedLimit} onChange={(event) => setApprovedLimit(event.target.value)} /></label><label>Justificativa interna<textarea rows={3} value={internalReason} onChange={(event) => setInternalReason(event.target.value)} placeholder="Observações visíveis apenas para a gestão e analista"></textarea></label><label>Mensagem para o vendedor<textarea rows={3} value={clientMessage} onChange={(event) => setClientMessage(event.target.value)} placeholder="Explicação que o vendedor verá em Minhas solicitações"></textarea></label><label>E-mail para envio do resultado<input type="email" value={recipientEmail} onChange={(event) => setRecipientEmail(event.target.value)} placeholder="email@empresa.com.br" /></label><div className="decision-buttons"><button className={decision === 'NEGADA' ? 'deny-btn chosen' : 'deny-btn'} onClick={() => onDecision('NEGADA', undefined, recipientEmail, internalReason, clientMessage)}><X size={17} /> Negar crédito</button><button className={decision === 'APROVADA' ? 'approve-btn chosen' : 'approve-btn'} onClick={() => onDecision('APROVADA', approvedLimitValue, recipientEmail, internalReason, clientMessage)}><Check size={17} /> Aprovar crédito</button></div><small className="decision-note"><Bell size={13} /> Ao decidir, um e-mail com o resultado será enviado para o endereço confirmado acima.</small></section>
       </>}</div>
     </div>}

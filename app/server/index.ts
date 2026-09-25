@@ -1,6 +1,7 @@
 import 'dotenv/config'
 import bcrypt from 'bcryptjs'
 import cors from 'cors'
+import { execFileSync } from 'node:child_process'
 import { createHash, randomBytes } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
@@ -153,6 +154,82 @@ const mailer = process.env.SMTP_HOST
     })
   : null
 
+// Integração com a API do sistema Prático: o vendedor localiza o cadastro do cliente pelo
+// código (cd_cliente) ou pelo CPF/CNPJ e o formulário é preenchido com os dados de lá.
+// A consulta passa pelo backend para que o usuário/senha da API fiquem só no servidor.
+const praticoApiUrl = (process.env.PRATICO_API_URL || '').replace(/\/+$/, '')
+const praticoCompany = process.env.PRATICO_CD_EMPRESA ? Number(process.env.PRATICO_CD_EMPRESA) : null
+type PraticoCity = { cd_cidade?: number; nm_cidade?: string; uf?: string } | null
+type PraticoClient = {
+  cd_cliente?: number; cd_empresa?: number; nm_cliente?: string; apelido_cliente?: string; tipo?: string
+  cpf?: string; cgc?: string; razao?: string; inscricao?: string; fone?: string; celular?: string; email?: string; contato?: string
+  endereco?: string; bairro?: string; cidade?: PraticoCity; uf?: string; cep?: string
+}
+let praticoToken: { value: string; expiresAt: number } | null = null
+
+const praticoLogin = async () => {
+  const response = await fetch(`${praticoApiUrl}/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cd_usuario: process.env.PRATICO_API_USER, senha: process.env.PRATICO_API_PASSWORD }),
+    signal: AbortSignal.timeout(10000),
+  })
+  if (!response.ok) throw new Error(`Login na API do Prático falhou (HTTP ${response.status}): ${(await response.text().catch(() => "")).slice(0, 300)}`)
+  const { token } = await response.json() as { token?: string }
+  if (!token) throw new Error('A API do Prático não retornou o token de acesso.')
+  const exp = (jwt.decode(token) as { exp?: number } | null)?.exp
+  // Renova um minuto antes de expirar; sem "exp" no token, reaproveita por 30 minutos.
+  praticoToken = { value: token, expiresAt: exp ? exp * 1000 - 60_000 : Date.now() + 30 * 60_000 }
+  return token
+}
+
+const praticoGet = async (pathWithQuery: string, retry = true): Promise<unknown> => {
+  const token = praticoToken && praticoToken.expiresAt > Date.now() ? praticoToken.value : await praticoLogin()
+  const response = await fetch(`${praticoApiUrl}${pathWithQuery}`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(15000) })
+  if ((response.status === 401 || response.status === 403) && retry) { praticoToken = null; return praticoGet(pathWithQuery, false) }
+  if (response.status === 404) return null
+  if (!response.ok) throw new Error(`API do Prático respondeu HTTP ${response.status} em ${pathWithQuery}: ${(await response.text().catch(() => "")).slice(0, 300)}`)
+  return response.json()
+}
+
+// A listagem é paginada (Spring Page com "content"), mas aceitamos também lista pura ou objeto único.
+const praticoClientList = (payload: unknown): PraticoClient[] => {
+  if (!payload) return []
+  if (Array.isArray(payload)) return payload as PraticoClient[]
+  const page = payload as { content?: unknown }
+  if (Array.isArray(page.content)) return page.content as PraticoClient[]
+  return (payload as PraticoClient).cd_cliente != null ? [payload as PraticoClient] : []
+}
+
+const searchPraticoClients = async (params: Record<string, string>) => {
+  const query = new URLSearchParams({ ...params, size: '20' })
+  if (praticoCompany) query.set('cdEmpresa', String(praticoCompany))
+  return praticoClientList(await praticoGet(`/cliente?${query}`))
+}
+
+const maskDocument = (digits: string) => digits.length === 11
+  ? digits.replace(/^(\d{3})(\d{3})(\d{3})(\d{2})$/, '$1.$2.$3-$4')
+  : digits.replace(/^(\w{2})(\w{3})(\w{3})(\w{4})(\d{2})$/, '$1.$2.$3/$4-$5')
+
+const trimOrNull = (value?: string | null) => value?.trim() || null
+const toSisCredClient = (client: PraticoClient) => {
+  const document = (trimOrNull(client.cgc) || trimOrNull(client.cpf) || '').replace(/[^A-Z0-9]/gi, '').toUpperCase()
+  const city = client.cidade?.nm_cidade ? `${client.cidade.nm_cidade.trim()}/${(client.cidade.uf || client.uf || '').trim()}` : null
+  return {
+    clientCode: String(client.cd_cliente),
+    companyCode: client.cd_empresa ?? null,
+    personType: client.tipo === 'F' ? 'F' : client.tipo === 'J' ? 'J' : document.length === 11 ? 'F' : 'J',
+    document: document ? maskDocument(document) : null,
+    companyName: trimOrNull(client.razao) || trimOrNull(client.nm_cliente),
+    tradeName: trimOrNull(client.apelido_cliente) || (trimOrNull(client.razao) ? trimOrNull(client.nm_cliente) : null),
+    stateRegistration: trimOrNull(client.inscricao),
+    phones: [trimOrNull(client.fone), trimOrNull(client.celular)].filter((phone): phone is string => !!phone),
+    email: trimOrNull(client.email),
+    contactName: trimOrNull(client.contato),
+    address: [trimOrNull(client.endereco), trimOrNull(client.bairro), city, client.cep ? `CEP ${client.cep.trim()}` : null].filter(Boolean).join(', ') || null,
+  }
+}
+
 // Logo embutida como anexo inline (cid) em vez de referenciada por URL — assim ela aparece
 // corretamente no e-mail mesmo quando o cliente de e-mail bloqueia imagens externas, e
 // independe do domínio público estar acessível no momento do envio.
@@ -164,6 +241,40 @@ const emailLogo = (() => {
   }
 })()
 const emailAttachments = emailLogo ? [{ filename: 'logo_sc.jpg', content: emailLogo, cid: 'siscred-logo' }] : []
+
+// Versão do sistema e verificação de atualização no GitHub (só leitura — nunca aplica nada
+// sozinho: o admin só vê o aviso e o comando de deploy, quem roda continua sendo um humano
+// via SSH, ver app/docs/deploy-linux.md).
+type ChangelogEntry = { version: string; date: string; notes: string[] }
+const localVersionInfo = (() => {
+  try {
+    const parsed = JSON.parse(readFileSync(path.join(process.cwd(), 'version.json'), 'utf-8')) as { version: string; changelog: ChangelogEntry[] }
+    return parsed
+  } catch {
+    return { version: '0.0.0', changelog: [] as ChangelogEntry[] }
+  }
+})()
+const compareVersions = (a: string, b: string) => {
+  const partsA = a.split('.').map(Number)
+  const partsB = b.split('.').map(Number)
+  for (let i = 0; i < Math.max(partsA.length, partsB.length); i++) {
+    const diff = (partsA[i] || 0) - (partsB[i] || 0)
+    if (diff) return diff
+  }
+  return 0
+}
+const githubRepo = process.env.GITHUB_REPO || ''
+const githubBranch = process.env.GITHUB_BRANCH || 'main'
+const githubHeaders: Record<string, string> = {
+  Accept: 'application/vnd.github+json',
+  'User-Agent': 'sis-cred-update-check',
+  ...(process.env.GITHUB_TOKEN ? { Authorization: `Bearer ${process.env.GITHUB_TOKEN}` } : {}),
+}
+const githubGet = async (pathWithQuery: string) => {
+  const response = await fetch(`https://api.github.com/repos/${githubRepo}${pathWithQuery}`, { headers: githubHeaders, signal: AbortSignal.timeout(10000) })
+  if (!response.ok) throw new Error(`GitHub respondeu HTTP ${response.status} em ${pathWithQuery}`)
+  return response.json()
+}
 
 const escapeHtml = (value: string) =>
   value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
@@ -468,6 +579,32 @@ app.get('/api/events', authenticateSseTicket, (request, response) => {
 
 app.use('/api', authenticate)
 
+// Busca o cadastro do cliente no Prático. "by" = "code" (cd_cliente) ou "document" (CPF/CNPJ).
+app.get('/api/pratico/clients', async (request, response) => {
+  if (!praticoApiUrl || !process.env.PRATICO_API_USER) { response.status(503).json({ message: 'Integração com o Prático não configurada no servidor.' }); return }
+  const by = request.query.by
+  const value = typeof request.query.value === 'string' ? request.query.value.trim() : ''
+  try {
+    let clients: PraticoClient[] = []
+    if (by === 'code') {
+      if (!/^\d{1,9}$/.test(value)) { response.status(400).json({ message: 'Informe um código de cliente válido (somente números).' }); return }
+      clients = await searchPraticoClients({ cdCliente: value })
+    } else if (by === 'document') {
+      const digits = value.replace(/[^A-Z0-9]/gi, '').toUpperCase()
+      if (digits.length !== 11 && digits.length !== 14) { response.status(400).json({ message: 'Informe um CPF (11 dígitos) ou CNPJ (14 caracteres) válido.' }); return }
+      const param = digits.length === 11 ? 'cpf' : 'cgc'
+      // Não sabemos se o Prático guarda o documento com ou sem máscara: tenta os dois.
+      clients = await searchPraticoClients({ [param]: digits })
+      if (!clients.length) clients = await searchPraticoClients({ [param]: maskDocument(digits) })
+    } else { response.status(400).json({ message: 'Tipo de busca inválido.' }); return }
+    response.json(clients.map(toSisCredClient))
+  } catch (error) {
+    console.error("[Prático]", error)
+    const detail = error instanceof Error ? (error.cause instanceof Error ? `${error.message} (${error.cause.message})` : error.message) : String(error)
+    response.status(502).json({ message: `Não foi possível consultar o Prático: ${detail}` })
+  }
+})
+
 app.post('/api/auth/change-password', strictAuthLimiter, async (request, response) => {
   const authUser = (request as AuthRequest).user
   const { currentPassword, newPassword } = request.body
@@ -617,6 +754,39 @@ app.get('/api/admin/overview', authorize('ADMIN'), async (_request, response) =>
     response.status(500).json({ message: 'Não foi possível carregar a conferência administrativa.' })
   } finally {
     connection?.release()
+  }
+})
+
+// Só verifica e informa — nunca baixa nem aplica nada sozinho. Quem publica a atualização
+// continua sendo um humano com acesso SSH ao servidor (deploy/linux/update.sh), de propósito:
+// o processo da API roda em produção com permissão só de leitura no diretório do sistema
+// (ver app/docs/deploy-linux.md), e isso não muda aqui.
+app.get('/api/admin/updates/check', authorize('ADMIN'), async (_request, response) => {
+  if (!githubRepo) { response.status(503).json({ message: 'Verificação de atualização não configurada (defina GITHUB_REPO no .env).' }); return }
+  try {
+    let localCommitSha: string | null = null
+    try { localCommitSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: process.cwd(), timeout: 5000 }).toString().trim() } catch { /* .git pode não existir neste deploy — segue sem o sha */ }
+
+    const [latestCommit, remoteVersionFile] = await Promise.all([
+      githubGet(`/commits/${githubBranch}`) as Promise<{ sha: string }>,
+      githubGet(`/contents/app/version.json?ref=${githubBranch}`) as Promise<{ content: string }>,
+    ])
+    const remoteInfo = JSON.parse(Buffer.from(remoteVersionFile.content, 'base64').toString('utf-8')) as { version: string; changelog: ChangelogEntry[] }
+
+    let commitsAhead: number | null = null
+    if (localCommitSha && localCommitSha !== latestCommit.sha) {
+      try {
+        const comparison = await githubGet(`/compare/${localCommitSha}...${latestCommit.sha}`) as { ahead_by: number }
+        commitsAhead = comparison.ahead_by
+      } catch { /* comparação falhou (ex.: commit local não existe mais no remoto após um rebase) — segue sem o número */ }
+    }
+
+    const updateAvailable = compareVersions(remoteInfo.version, localVersionInfo.version) > 0 || (commitsAhead ?? 0) > 0
+    const newChangelog = remoteInfo.changelog.filter((entry) => compareVersions(entry.version, localVersionInfo.version) > 0)
+    response.json({ currentVersion: localVersionInfo.version, latestVersion: remoteInfo.version, updateAvailable, commitsAhead, newChangelog })
+  } catch (error) {
+    console.error('[Atualizações]', error)
+    response.status(502).json({ message: 'Não foi possível verificar atualizações no GitHub agora.' })
   }
 })
 

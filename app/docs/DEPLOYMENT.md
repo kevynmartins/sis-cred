@@ -62,6 +62,12 @@ ambiente guarda seus próprios segredos e nunca são sobrescritos por um `git pu
 1. **No seu computador**: desenvolva, teste localmente (`npm run dev` + `npm run api`),
    e quando estiver pronto:
 
+   - Se a mudança for algo que o usuário percebe (não um ajuste interno/refatoração),
+     atualize `app/version.json`: suba o número de `version` e acrescente uma entrada
+     no `changelog` descrevendo em uma ou duas frases o que mudou. Isso é o que faz
+     aparecer o aviso "O que mudou no Sis-Cred" para quem já usava o sistema, e o que o
+     card "Atualizações do sistema" do Admin compara com o GitHub.
+
    ```bash
    git add -A
    git commit -m "descrição da mudança"
@@ -131,6 +137,9 @@ requests antes de mesclar em `main` — o fluxo de publicação no servidor cont
 | `SMTP_PORT` | não (padrão `465`) | Porta SMTP. |
 | `SMTP_USER` / `SMTP_PASS` | não* | Credenciais SMTP. |
 | `SMTP_FROM` | não | Remetente exibido nos e-mails. |
+| `GITHUB_REPO` | não | `owner/repo` do GitHub, para o card "Atualizações do sistema" no Admin. Sem isso, o card fica oculto. |
+| `GITHUB_BRANCH` | não (padrão `main`) | Branch comparada para saber se há uma versão mais nova. |
+| `GITHUB_TOKEN` | não | Só necessário se o repositório for privado, ou para não esbarrar no limite de 60 req/hora da API do GitHub sem autenticação. |
 
 \* Se `SMTP_HOST` não for definido, o envio de e-mail fica desabilitado e o recurso
 "esqueci minha senha" não funciona — defina para produção.
