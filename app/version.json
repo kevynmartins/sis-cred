@@ -1,21 +1,15 @@
 {
-  "version": "1.0.2",
+  "version": "1.0.3",
   "changelog": [
     {
-      "version": "1.0.2",
-      "date": "2026-09-25",
+      "version": "1.0.3",
+      "date": "2026-09-29",
       "notes": [
-        "Corrige o comando de atualização sugerido no painel do administrador (faltava a pasta app).",
-        "O script de atualização do servidor já vem pronto para rodar, sem precisar de um passo manual antes."
-      ]
-    },
-    {
-      "version": "1.0.1",
-      "date": "2026-09-25",
-      "notes": [
-        "Número da versão 1.0.1",
-        "Número da versão do sistema aparece no menu lateral, com um aviso do que mudou a cada atualização.",
-        "O painel do administrador avisa quando há uma nova versão disponível no GitHub, com botão para ver o changelog e copiar o comando de deploy."
+        "Na ficha cadastral, o vendedor pode anexar vários PDFs de uma vez (contrato social, certificado e outros documentos), com a lista dos arquivos e a opção de remover cada um antes de enviar.",
+        "A analista e a auditoria passam a ver todos os PDFs anexados pelo vendedor, e não só o último.",
+        "Novo acesso de manutenção: o administrador pode entrar na conta de um usuário para investigar erros e corrigir dados, informando o motivo. O acesso dura até 1 hora e aparece numa faixa no topo da tela.",
+        "No modo de manutenção, os dados de uma solicitação podem ser corrigidos em qualquer etapa, sem alterar o andamento dela.",
+        "Toda entrada e saída do modo de manutenção fica registrada no painel do administrador, e as ações feitas nesse período aparecem marcadas na auditoria."
       ]
     }
   ]
