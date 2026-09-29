@@ -74,3 +74,17 @@
 .update-check-card .card-heading{align-items:center}
 .update-badge{background:#fff3d6;color:#96660a;border-radius:15px;padding:5px 9px;font-size:11px;font-weight:600;white-space:nowrap}
 .update-badge.ok{background:#e5f7ef;color:#16855f}
+.attached-files{display:grid;gap:6px;margin-top:10px}
+.attached-file{display:flex;align-items:center;gap:9px;border:1px solid #e8edf3;background:#fff;border-radius:10px;padding:7px 8px 7px 12px;color:#526277}
+.attached-file span{flex:1;min-width:0;font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.attached-file small{font-size:11px;color:#9ea9b5;flex-shrink:0}
+.impersonation-banner{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:10px;background:#fff3d6;border-bottom:1px solid #f0c757;color:#6b4a06;padding:10px 42px;font-size:13px}
+.impersonation-banner>svg{flex-shrink:0;color:#96660a}
+.impersonation-banner span{flex:1;min-width:0}
+.impersonation-banner button{flex-shrink:0;display:flex;align-items:center;gap:6px;border:1px solid #e0b23e;background:#fff;color:#6b4a06;border-radius:8px;padding:7px 12px;font-size:12px;font-weight:600;cursor:pointer;transition:all .15s ease}
+.impersonation-banner button:hover{background:#fbba00;color:#171717}
+.small-action.maintenance{display:inline-flex;align-items:center;gap:4px;border-color:#f0c757;color:#96660a;background:#fffaf0}
+.maintenance-card{margin-bottom:22px}
+.maintenance-card .card-heading{gap:14px}
+.maintenance-card .check-line>svg{color:#96660a;background:#fff3d6}
+@media(max-width:580px){.impersonation-banner{padding:10px 16px;flex-wrap:wrap}.maintenance-card .card-heading{flex-direction:column}}

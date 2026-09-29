@@ -2,6 +2,7 @@ import 'dotenv/config'
 import bcrypt from 'bcryptjs'
 import cors from 'cors'
 import { execFileSync } from 'node:child_process'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { createHash, randomBytes } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
@@ -343,20 +344,28 @@ const apiLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 600, standardHea
 app.use('/api', apiLimiter)
 
 type UserRole = 'VENDEDOR' | 'ANALISTA' | 'GESTORA' | 'ADMIN'
-type AuthUser = { id: number; name: string; email: string; role: UserRole }
+// impersonatedBy só existe no token de acesso de manutenção: o administrador entra na conta
+// de outro usuário e o sistema se comporta como se fosse ele, mas sabendo quem está de fato ali.
+type Impersonator = { id: number; name: string }
+type AuthUser = { id: number; name: string; email: string; role: UserRole; impersonatedBy?: Impersonator }
 type AuthRequest = Request & { user?: AuthUser }
 type SseTicket = AuthUser & { purpose: 'sse' }
+
+// Guarda o administrador por trás da requisição atual para que logAuditEvent marque as
+// ações feitas em modo de manutenção sem precisar alterar cada rota que registra auditoria.
+const impersonationContext = new AsyncLocalStorage<Impersonator | undefined>()
 
 const authenticate = (request: Request, response: Response, next: NextFunction) => {
   const header = request.headers.authorization
   const token = header?.startsWith('Bearer ') ? header.slice(7) : null
   if (!token) { response.status(401).json({ message: 'Autenticação necessária.' }); return }
+  let user: AuthUser & { purpose?: string }
   try {
-    const user = jwt.verify(token, jwtSecret, { algorithms: ['HS256'] }) as AuthUser & { purpose?: string }
-    if (user.purpose) { response.status(401).json({ message: 'Sessão inválida ou expirada.' }); return }
-    ;(request as AuthRequest).user = user
-    next()
-  } catch { response.status(401).json({ message: 'Sessão inválida ou expirada.' }) }
+    user = jwt.verify(token, jwtSecret, { algorithms: ['HS256'] }) as AuthUser & { purpose?: string }
+  } catch { response.status(401).json({ message: 'Sessão inválida ou expirada.' }); return }
+  if (user.purpose) { response.status(401).json({ message: 'Sessão inválida ou expirada.' }); return }
+  ;(request as AuthRequest).user = user
+  impersonationContext.run(user.impersonatedBy, next)
 }
 
 const authenticateSseTicket = (request: Request, response: Response, next: NextFunction) => {
@@ -394,10 +403,14 @@ const logAuditEvent = (
   actorId: number | undefined,
   eventType: string,
   eventData: Record<string, unknown> | null = null,
-) => connection.query(
-  'INSERT INTO audit_events (request_id, actor_id, event_type, event_data) VALUES (?, ?, ?, ?)',
-  [requestId, actorId ?? null, eventType, eventData ? JSON.stringify(eventData) : null],
-)
+) => {
+  const impersonatedBy = impersonationContext.getStore()
+  const data = impersonatedBy ? { ...eventData, impersonatedBy } : eventData
+  return connection.query(
+    'INSERT INTO audit_events (request_id, actor_id, event_type, event_data) VALUES (?, ?, ?, ?)',
+    [requestId, actorId ?? null, eventType, data ? JSON.stringify(data) : null],
+  )
+}
 
 app.get('/api/health', async (_request, response) => {
   let connection
@@ -608,6 +621,7 @@ app.get('/api/pratico/clients', async (request, response) => {
 app.post('/api/auth/change-password', strictAuthLimiter, async (request, response) => {
   const authUser = (request as AuthRequest).user
   const { currentPassword, newPassword } = request.body
+  if (authUser?.impersonatedBy) { response.status(403).json({ message: 'No modo de manutenção não é possível trocar a senha do usuário. Use "Trocar senha" na tela de Usuários.' }); return }
   if (!currentPassword || !newPassword) { response.status(400).json({ message: 'Informe a senha atual e a nova senha.' }); return }
   const passwordError = validatePassword(newPassword)
   if (passwordError) { response.status(400).json({ message: passwordError }); return }
@@ -999,6 +1013,78 @@ app.delete('/api/admin/users/:id', authorize('ADMIN', 'GESTORA'), async (request
   }
 })
 
+// Acesso de manutenção: só o administrador (logado com a própria conta, não já dentro de outra)
+// pode entrar na conta de outro usuário para investigar e corrigir problemas. O token dura
+// pouco, carrega quem é o administrador e todo início/fim fica em admin_access_log.
+app.post('/api/admin/users/:id/impersonate', authorize('ADMIN'), async (request, response) => {
+  const userId = Number(request.params.id)
+  const authUser = (request as AuthRequest).user!
+  const reason = typeof request.body?.reason === 'string' ? request.body.reason.trim() : ''
+  if (authUser.impersonatedBy) { response.status(403).json({ message: 'Saia do modo de manutenção antes de acessar outra conta.' }); return }
+  if (!userId || userId === authUser.id) { response.status(400).json({ message: 'Usuário inválido.' }); return }
+  if (reason.length < 5) { response.status(400).json({ message: 'Informe o motivo do acesso (mínimo 5 caracteres).' }); return }
+  let connection
+  try {
+    connection = await pool.getConnection()
+    const rows = await connection.query('SELECT id, name, email, role, (avatar_data IS NOT NULL) AS hasAvatar FROM users WHERE id = ? LIMIT 1', [userId])
+    const target = rows[0]
+    if (!target) { response.status(404).json({ message: 'Usuário não encontrado.' }); return }
+    if (target.role === 'ADMIN') { response.status(403).json({ message: 'Não é permitido acessar a conta de outro administrador.' }); return }
+    await connection.query(
+      'INSERT INTO admin_access_log (admin_id, target_user_id, action, reason, ip_address) VALUES (?, ?, ?, ?, ?)',
+      [authUser.id, userId, 'INICIO', reason.slice(0, 255), request.ip || null],
+    )
+    const impersonated: AuthUser = { id: Number(target.id), name: target.name, email: target.email, role: target.role, impersonatedBy: { id: authUser.id, name: authUser.name } }
+    const token = jwt.sign(impersonated, jwtSecret, { expiresIn: process.env.IMPERSONATION_EXPIRES_IN || '1h' } as jwt.SignOptions)
+    response.json({ token, user: { ...impersonated, avatarUrl: target.hasAvatar ? `/api/users/${target.id}/avatar` : null } })
+  } catch (error) {
+    console.error(error)
+    response.status(500).json({ message: 'Não foi possível acessar a conta do usuário.' })
+  } finally {
+    connection?.release()
+  }
+})
+
+app.post('/api/impersonation/end', async (request, response) => {
+  const authUser = (request as AuthRequest).user!
+  if (!authUser.impersonatedBy) { response.status(400).json({ message: 'Você não está em modo de manutenção.' }); return }
+  let connection
+  try {
+    connection = await pool.getConnection()
+    await connection.query(
+      'INSERT INTO admin_access_log (admin_id, target_user_id, action, ip_address) VALUES (?, ?, ?, ?)',
+      [authUser.impersonatedBy.id, authUser.id, 'FIM', request.ip || null],
+    )
+    response.json({ message: 'Modo de manutenção encerrado.' })
+  } catch (error) {
+    console.error(error)
+    response.status(500).json({ message: 'Não foi possível registrar o fim do acesso.' })
+  } finally {
+    connection?.release()
+  }
+})
+
+app.get('/api/admin/access-log', authorize('ADMIN'), async (_request, response) => {
+  let connection
+  try {
+    connection = await pool.getConnection()
+    const rows = await connection.query(
+      `SELECT l.id, l.action, l.reason, l.ip_address AS ipAddress, l.created_at AS createdAt,
+        a.name AS adminName, t.name AS targetName, t.role AS targetRole
+       FROM admin_access_log l
+       INNER JOIN users a ON a.id = l.admin_id
+       INNER JOIN users t ON t.id = l.target_user_id
+       ORDER BY l.created_at DESC, l.id DESC LIMIT 50`,
+    )
+    response.json(rows)
+  } catch (error) {
+    console.error(error)
+    response.status(500).json({ message: 'Não foi possível carregar os acessos de manutenção.' })
+  } finally {
+    connection?.release()
+  }
+})
+
 app.post('/api/credit-requests', authorize('VENDEDOR', 'ADMIN'), async (request, response) => {
   const authUser = (request as AuthRequest).user
   const {
@@ -1139,21 +1225,25 @@ app.patch('/api/credit-requests/:id', authorize('VENDEDOR', 'ADMIN'), async (req
     if (!(await ensureRequestAccess(connection, requestId, authUser))) { response.status(404).json({ message: 'Solicitação não encontrada.' }); return }
     const [requestRow] = await connection.query('SELECT status, protocol FROM credit_requests WHERE id = ?', [requestId])
     if (!requestRow) { response.status(404).json({ message: 'Solicitação não encontrada.' }); return }
-    if (requestRow.status !== 'DEVOLVIDA') { response.status(400).json({ message: 'Só é possível editar cadastros devolvidos para ajustes.' }); return }
+    // No modo de manutenção o administrador corrige os dados de uma solicitação em qualquer
+    // etapa sem mexer no andamento dela; fora disso, só cadastros devolvidos podem ser editados.
+    const isMaintenanceEdit = !!authUser?.impersonatedBy && requestRow.status !== 'DEVOLVIDA'
+    if (requestRow.status !== 'DEVOLVIDA' && !isMaintenanceEdit) { response.status(400).json({ message: 'Só é possível editar cadastros devolvidos para ajustes.' }); return }
+    const nextStatus = isMaintenanceEdit ? requestRow.status : 'RECEBIDA'
     await connection.beginTransaction()
     await connection.query(
       `UPDATE credit_requests SET
         client_code = ?, company_name = ?, trade_name = ?, cnpj = ?, state_registration = ?, phone = ?, address = ?,
         invoice_email = ?, finance_email = ?, contact_name = ?, contact_email = ?, request_purpose = ?, purchase_authorization = ?,
-        delivery_type = ?, delivery_location = ?, delivery_address = ?, origin = ?, seller_notes = ?,
-        status = 'RECEBIDA', return_reason = NULL
+        delivery_type = ?, delivery_location = ?, delivery_address = ?, origin = ?, seller_notes = ?${isMaintenanceEdit ? '' : `,
+        status = 'RECEBIDA', return_reason = NULL`}
        WHERE id = ?`,
       [clientCode, companyName, tradeName || null, cnpj, stateRegistration || null, phone || null, address || null, invoiceEmail || null, financeEmail || null, contactName, contactEmail, requestPurpose, purchaseAuthorization, deliveryType, deliveryLocation, deliveryAddress || null, origin || null, sellerNotes || null, requestId],
     )
-    await logAuditEvent(connection, requestId, authUser?.id, 'SOLICITACAO_REENVIADA', { protocol: requestRow.protocol })
+    await logAuditEvent(connection, requestId, authUser?.id, isMaintenanceEdit ? 'CORRECAO_MANUTENCAO' : 'SOLICITACAO_REENVIADA', { protocol: requestRow.protocol })
     await connection.commit()
-    broadcast('requests-changed', { requestId, reason: 'resent', actorId: authUser?.id, protocol: requestRow.protocol, companyName, status: 'RECEBIDA' })
-    response.json({ status: 'RECEBIDA' })
+    broadcast('requests-changed', { requestId, reason: isMaintenanceEdit ? 'maintenance-edit' : 'resent', actorId: authUser?.id, protocol: requestRow.protocol, companyName, status: nextStatus })
+    response.json({ status: nextStatus, maintenance: isMaintenanceEdit })
   } catch (error) {
     await connection?.rollback()
     console.error(error)

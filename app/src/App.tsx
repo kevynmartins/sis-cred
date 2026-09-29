@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
-import { Activity, ArrowLeft, ArrowUpRight, Bell, Building2, Camera, Check, CheckCircle2, ChevronDown, ChevronUp, ClipboardCheck, ClipboardList, Download, Eye, FileCheck2, FileText, Info, LogOut, Menu, MessageSquareText, Paperclip, Pencil, Phone, Plus, RotateCcw, Search, Send, ShieldCheck, Sparkles, Trash2, UploadCloud, Users, X, XCircle } from 'lucide-react'
+import { Activity, ArrowLeft, ArrowUpRight, Bell, Building2, Camera, Check, CheckCircle2, ChevronDown, ChevronUp, ClipboardCheck, ClipboardList, Download, Eye, FileCheck2, FileText, Info, LogOut, Menu, MessageSquareText, Paperclip, Pencil, Phone, Plus, RotateCcw, Search, Send, ShieldCheck, Sparkles, Trash2, UploadCloud, Users, Wrench, X, XCircle } from 'lucide-react'
 import './App.css'
 import versionData from '../version.json'
 
@@ -22,14 +22,18 @@ type Role = 'vendedor' | 'analista' | 'gestao' | 'admin'
 type BackendRole = 'VENDEDOR' | 'ANALISTA' | 'GESTORA' | 'ADMIN'
 type Status = 'RECEBIDA' | 'EM_ANALISE' | 'AGUARDANDO_GESTAO' | 'APROVADA' | 'NEGADA' | 'DEVOLVIDA'
 type Request = { id: number; protocol: string; clientCode: string; companyName: string; tradeName: string | null; cnpj: string; stateRegistration: string | null; phone: string | null; address: string | null; invoiceEmail: string | null; financeEmail: string | null; contactName: string | null; contactEmail: string | null; requestPurpose: string | null; purchaseAuthorization: string | null; deliveryType: string | null; deliveryLocation: string | null; deliveryAddress: string | null; requestedLimit: number | null; approvedLimit: number | null; origin: string | null; sellerNotes: string | null; returnReason: string | null; status: Status; sellerName: string; sellerEmail: string; sellerCode: string | null; sellerStore: string | null; sellerManagerName: string | null; sellerWhatsapp: string | null; submittedAt: string; praticoConfirmedAt: string | null; praticoConfirmedByName: string | null }
-type AuthUser = { id: number; name: string; email: string; role: BackendRole; avatarUrl?: string | null }
+type AuthUser = { id: number; name: string; email: string; role: BackendRole; avatarUrl?: string | null; impersonatedBy?: { id: number; name: string } }
 type AppNotification = { id: string; title: string; subtitle: string; onClick: () => void }
 
 const emptyRequest: Request = { id: 0, protocol: '', clientCode: '', companyName: '', tradeName: null, cnpj: '', stateRegistration: null, phone: null, address: null, invoiceEmail: null, financeEmail: null, contactName: null, contactEmail: null, requestPurpose: null, purchaseAuthorization: null, deliveryType: null, deliveryLocation: null, deliveryAddress: null, requestedLimit: null, approvedLimit: null, origin: null, sellerNotes: null, returnReason: null, status: 'RECEBIDA', sellerName: '', sellerEmail: '', sellerCode: null, sellerStore: null, sellerManagerName: null, sellerWhatsapp: null, submittedAt: '', praticoConfirmedAt: null, praticoConfirmedByName: null }
 const apiUrl = import.meta.env.DEV ? 'http://localhost:3001' : ''
 const tokenKey = 'sisCredToken'
 const userKey = 'sisCredUser'
+// Sessão do administrador guardada enquanto ele está dentro da conta de outro usuário (modo de manutenção).
+const adminTokenBackupKey = 'sisCredAdminToken'
+const adminUserBackupKey = 'sisCredAdminUser'
 const roleMap: Record<BackendRole, Role> = { VENDEDOR: 'vendedor', ANALISTA: 'analista', GESTORA: 'gestao', ADMIN: 'admin' }
+const roleLabel: Record<BackendRole, string> = { VENDEDOR: 'Vendedor', ANALISTA: 'Analista', GESTORA: 'Gestão', ADMIN: 'Administrador' }
 const money = (value: number | null) => (value == null ? 'A definir' : value.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }))
 const whatsappLink = (raw: string) => `https://wa.me/55${raw.replace(/\D/g, '')}`
 const formatCnpj = (raw: string) => {
@@ -68,8 +72,18 @@ const apiFetch = async (path: string, options: RequestInit = {}) => {
   if (token) headers.set('Authorization', `Bearer ${token}`)
   const response = await fetch(`${apiUrl}${path}`, { ...options, headers })
   if (response.status === 401 && token) {
-    localStorage.removeItem(tokenKey)
-    localStorage.removeItem(userKey)
+    // Se o acesso de manutenção expirou, volta para a sessão do administrador em vez de deslogar.
+    const adminToken = localStorage.getItem(adminTokenBackupKey)
+    const adminUser = localStorage.getItem(adminUserBackupKey)
+    if (adminToken && adminUser && adminToken !== token) {
+      localStorage.setItem(tokenKey, adminToken)
+      localStorage.setItem(userKey, adminUser)
+    } else {
+      localStorage.removeItem(tokenKey)
+      localStorage.removeItem(userKey)
+    }
+    localStorage.removeItem(adminTokenBackupKey)
+    localStorage.removeItem(adminUserBackupKey)
     window.location.reload()
   }
   return response
@@ -83,6 +97,16 @@ const uploadDocument = (requestId: number, documentType: string, file: File) => 
   data.append('documentType', documentType)
   data.append('file', file)
   return apiFetch(`/api/credit-requests/${requestId}/documents`, { method: 'POST', body: data })
+}
+
+// Envia os PDFs um por vez e devolve os nomes dos que não foram salvos.
+const uploadContractFiles = async (requestId: number, files: File[]): Promise<string[]> => {
+  const failed: string[] = []
+  for (const file of files) {
+    const response = await uploadDocument(requestId, 'CONTRATO_SOCIAL', file).catch(() => null)
+    if (!response || !response.ok) failed.push(file.name)
+  }
+  return failed
 }
 
 const listDocuments = async (requestId: number): Promise<DossierDocument[]> => {
@@ -233,7 +257,7 @@ function App() {
   const [decision, setDecision] = useState<'APROVADA' | 'NEGADA' | null>(null)
   const [showChangePassword, setShowChangePassword] = useState(false)
   const [showEditProfile, setShowEditProfile] = useState(false)
-  const [view, setView] = useState<'main' | 'users' | 'audit' | 'decisions' | 'requests'>('main')
+  const [view, setView] = useState<'main' | 'users' | 'audit' | 'decisions' | 'requests' | 'maintenance'>('main')
   const [editingRequest, setEditingRequest] = useState<Request | null>(null)
   const [profileMenuOpen, setProfileMenuOpen] = useState(false)
   const [notifMenuOpen, setNotifMenuOpen] = useState(false)
@@ -268,7 +292,8 @@ function App() {
     setShowEditProfile(false)
     pushToast('success', 'Perfil atualizado com sucesso.')
   }
-  useEffect(() => { setView('main') }, [role])
+  const nextViewRef = useRef<'main' | 'users' | null>(null)
+  useEffect(() => { setView(nextViewRef.current ?? 'main'); nextViewRef.current = null }, [role, user?.id])
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       if (profileMenuRef.current && !profileMenuRef.current.contains(event.target as Node)) setProfileMenuOpen(false)
@@ -340,7 +365,7 @@ function App() {
         onClick: () => { setView('decisions'); setNotifMenuOpen(false) },
       }))
     : []
-  const createRequest = async (form: HTMLFormElement, contractFile: File | null): Promise<string | null> => {
+  const createRequest = async (form: HTMLFormElement, contractFiles: File[]): Promise<string | null> => {
     const data = new FormData(form)
     const joinMultiple = (name: string) => data.getAll(name).map((value) => String(value).trim()).filter(Boolean).join('; ')
     const payload = {
@@ -354,14 +379,10 @@ function App() {
     const response = await apiFetch('/api/credit-requests', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
     if (!response.ok) { const body = await response.json().catch(() => null); return body?.message || 'Confira os campos obrigatórios da ficha.' }
     const created = await response.json()
-    let contractUploadFailed = false
-    if (contractFile) {
-      const uploadResponse = await uploadDocument(created.id, 'CONTRATO_SOCIAL', contractFile).catch(() => null)
-      contractUploadFailed = !uploadResponse || !uploadResponse.ok
-    }
+    const failedFiles = await uploadContractFiles(created.id, contractFiles)
     await loadRequests()
-    if (contractUploadFailed) {
-      const message = `Ficha ${created.protocol} enviada, mas o contrato social não foi salvo — reenvie o PDF com a analista.`
+    if (failedFiles.length) {
+      const message = `Ficha ${created.protocol} enviada, mas ${failedFiles.length === 1 ? 'o documento' : 'os documentos'} ${failedFiles.join(', ')} não ${failedFiles.length === 1 ? 'foi salvo' : 'foram salvos'} — reenvie o PDF com a analista.`
       pushToast('error', message)
       setBurst({ ok: false, title: 'Enviado com pendência', message })
     } else {
@@ -371,7 +392,7 @@ function App() {
     }
     return null
   }
-  const resendRequest = async (requestId: number, form: HTMLFormElement, contractFile: File | null): Promise<string | null> => {
+  const resendRequest = async (requestId: number, form: HTMLFormElement, contractFiles: File[]): Promise<string | null> => {
     const data = new FormData(form)
     const joinMultiple = (name: string) => data.getAll(name).map((value) => String(value).trim()).filter(Boolean).join('; ')
     const payload = {
@@ -384,22 +405,19 @@ function App() {
     }
     const response = await apiFetch(`/api/credit-requests/${requestId}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
     if (!response.ok) { const body = await response.json().catch(() => null); return body?.message || 'Confira os campos obrigatórios da ficha.' }
-    let contractUploadFailed = false
-    if (contractFile) {
-      const uploadResponse = await uploadDocument(requestId, 'CONTRATO_SOCIAL', contractFile).catch(() => null)
-      contractUploadFailed = !uploadResponse || !uploadResponse.ok
-    }
+    const { maintenance } = await response.json().catch(() => ({ maintenance: false })) as { maintenance?: boolean }
+    const failedFiles = await uploadContractFiles(requestId, contractFiles)
     await loadRequests()
     setEditingRequest(null)
     setView('requests')
-    if (contractUploadFailed) {
-      const message = 'Cadastro reenviado, mas o novo contrato social não foi salvo — reenvie o PDF com a analista.'
+    if (failedFiles.length) {
+      const message = `Cadastro reenviado, mas ${failedFiles.length === 1 ? 'o documento' : 'os documentos'} ${failedFiles.join(', ')} não ${failedFiles.length === 1 ? 'foi salvo' : 'foram salvos'} — reenvie o PDF com a analista.`
       pushToast('error', message)
       setBurst({ ok: false, title: 'Reenviado com pendência', message })
     } else {
-      const message = 'Cadastro corrigido e reenviado para a analista.'
+      const message = maintenance ? 'Dados da solicitação corrigidos. O andamento dela não foi alterado.' : 'Cadastro corrigido e reenviado para a analista.'
       pushToast('success', message)
-      setBurst({ ok: true, title: 'Cadastro reenviado!', message })
+      setBurst({ ok: true, title: maintenance ? 'Correção salva!' : 'Cadastro reenviado!', message })
     }
     return null
   }
@@ -445,7 +463,37 @@ function App() {
     const next = loaded.find((item) => item.status === 'RECEBIDA' || item.status === 'EM_ANALISE')
     setSelected(next || emptyRequest)
   }
-  const logout = () => { localStorage.removeItem(tokenKey); localStorage.removeItem(userKey); setUser(null) }
+  const logout = () => {
+    if (user?.impersonatedBy) apiFetch('/api/impersonation/end', { method: 'POST' }).catch(() => {})
+    for (const key of [tokenKey, userKey, adminTokenBackupKey, adminUserBackupKey]) localStorage.removeItem(key)
+    setUser(null)
+  }
+  const resetWorkspace = () => { setSelected(emptyRequest); setEditingRequest(null); setRequests([]); setProfileMenuOpen(false); setNotifMenuOpen(false) }
+  // Modo de manutenção: guarda a sessão do administrador e passa a usar o token da conta acessada.
+  const startImpersonation = (token: string, impersonated: AuthUser) => {
+    const adminToken = localStorage.getItem(tokenKey)
+    if (!adminToken || !user) return
+    localStorage.setItem(adminTokenBackupKey, adminToken)
+    localStorage.setItem(adminUserBackupKey, JSON.stringify(user))
+    localStorage.setItem(tokenKey, token)
+    localStorage.setItem(userKey, JSON.stringify(impersonated))
+    resetWorkspace()
+    setUser(impersonated)
+    pushToast('info', `Modo de manutenção: você está acessando como ${impersonated.name}.`)
+  }
+  const endImpersonation = async () => {
+    await apiFetch('/api/impersonation/end', { method: 'POST' }).catch(() => null)
+    const adminToken = localStorage.getItem(adminTokenBackupKey)
+    const adminUser = localStorage.getItem(adminUserBackupKey)
+    localStorage.removeItem(adminTokenBackupKey); localStorage.removeItem(adminUserBackupKey)
+    if (!adminToken || !adminUser) { logout(); return }
+    localStorage.setItem(tokenKey, adminToken)
+    localStorage.setItem(userKey, adminUser)
+    resetWorkspace()
+    nextViewRef.current = 'users'
+    try { setUser(JSON.parse(adminUser) as AuthUser) } catch { logout(); return }
+    pushToast('success', 'Modo de manutenção encerrado. Você voltou para a sua conta.')
+  }
 
   // Mostra "o que mudou" só quando a versão instalada no navegador é mais nova que a última
   // vista por esta pessoa — nunca no primeiro acesso (não há nada de "novo" para quem chega
@@ -459,7 +507,8 @@ function App() {
     }
     localStorage.setItem(lastSeenVersionKey, CURRENT_VERSION)
   }, [user])
-  const openChangelog = () => setWhatsNewEntries(CHANGELOG)
+  // O botão de novidades mostra só o que entrou na versão instalada; o histórico completo continua no version.json.
+  const openChangelog = () => setWhatsNewEntries(CHANGELOG.filter((entry) => entry.version === CURRENT_VERSION))
 
   const pageLoadingBar = pageLoading && <div className="page-loading-bar"><span></span></div>
 
@@ -467,8 +516,8 @@ function App() {
   if (!user || !role) return <>{pageLoadingBar}<LoginScreen onLogin={(loggedUser) => setUser(loggedUser)} /></>
 
   return <>{pageLoadingBar}<div className="app-shell">
-    <aside className="sidebar"><div className="brand"><img src="/logo_sc.jpg" alt="Sis-Cred" className="brand-logo" /></div><div className="workspace-label">ACESSO ATUAL</div><div className="current-role"><div className="role-icon">{role === 'vendedor' ? <Users size={16} /> : role === 'analista' ? <ClipboardCheck size={16} /> : <ShieldCheck size={16} />}</div><div><strong>{role === 'vendedor' ? 'Vendedor' : role === 'analista' ? 'Analista' : role === 'gestao' ? 'Gestão' : 'Administrador'}</strong><small>Acesso autorizado</small></div></div>{(role === 'admin' || role === 'gestao') && <div className="role-switcher" style={{ marginTop: 18 }}><button className={view === 'main' ? 'nav-item active' : 'nav-item'} onClick={() => setView('main')}>{role === 'admin' ? <Activity size={18} /> : <ShieldCheck size={18} />}<span>{role === 'admin' ? 'Administração' : 'Decisão de crédito'}</span></button><button className={view === 'users' ? 'nav-item active' : 'nav-item'} onClick={() => setView('users')}><Users size={18} /><span>Usuários</span></button><button className={view === 'audit' ? 'nav-item active' : 'nav-item'} onClick={() => setView('audit')}><FileCheck2 size={18} /><span>Auditoria</span></button></div>}{role === 'analista' && <div className="role-switcher" style={{ marginTop: 18 }}><button className={view === 'main' ? 'nav-item active' : 'nav-item'} onClick={() => setView('main')}><ClipboardCheck size={18} /><span>Triagem e dossiê</span></button><button className={view === 'decisions' ? 'nav-item active' : 'nav-item'} onClick={() => setView('decisions')}><FileCheck2 size={18} /><span>Decisões</span>{pendingDecisions.length > 0 && <span className="pending-dot">{pendingDecisions.length}</span>}</button></div>}{role === 'vendedor' && <div className="role-switcher" style={{ marginTop: 18 }}><button className={view === 'main' ? 'nav-item active' : 'nav-item'} onClick={() => { setEditingRequest(null); setView('main') }}><FileText size={18} /><span>Novo cadastro</span></button><button className={view === 'requests' ? 'nav-item active' : 'nav-item'} onClick={() => setView('requests')}><ClipboardCheck size={18} /><span>Minhas solicitações</span></button></div>}<div className="sidebar-bottom"><div className="help-box"><span>Processo digital</span><small>Sem papel no dossiê</small><ArrowUpRight size={16} /></div><button type="button" className="version-tag" onClick={openChangelog}><Sparkles size={12} /> v{CURRENT_VERSION} · novidades</button></div></aside>
-    <main className="main-content"><header className="topbar"><button className="mobile-menu"><Menu size={21} /></button><div className="breadcrumb">Sis-Cred <span>/</span> <b>{view === 'audit' ? 'Auditoria' : view === 'users' ? 'Usuários' : view === 'decisions' ? 'Decisões' : view === 'requests' ? 'Minhas solicitações' : role === 'vendedor' ? 'Novo cadastro' : role === 'analista' ? 'Triagem e dossiê' : role === 'gestao' ? 'Decisão de crédito' : 'Administração'}</b></div><div className="top-actions">
+    <aside className="sidebar"><div className="brand"><img src="/logo_sc.jpg" alt="Sis-Cred" className="brand-logo" /></div><div className="workspace-label">ACESSO ATUAL</div><div className="current-role"><div className="role-icon">{role === 'vendedor' ? <Users size={16} /> : role === 'analista' ? <ClipboardCheck size={16} /> : <ShieldCheck size={16} />}</div><div><strong>{role === 'vendedor' ? 'Vendedor' : role === 'analista' ? 'Analista' : role === 'gestao' ? 'Gestão' : 'Administrador'}</strong><small>Acesso autorizado</small></div></div>{(role === 'admin' || role === 'gestao') && <div className="role-switcher" style={{ marginTop: 18 }}><button className={view === 'main' ? 'nav-item active' : 'nav-item'} onClick={() => setView('main')}>{role === 'admin' ? <Activity size={18} /> : <ShieldCheck size={18} />}<span>{role === 'admin' ? 'Administração' : 'Decisão de crédito'}</span></button><button className={view === 'users' ? 'nav-item active' : 'nav-item'} onClick={() => setView('users')}><Users size={18} /><span>Usuários</span></button><button className={view === 'audit' ? 'nav-item active' : 'nav-item'} onClick={() => setView('audit')}><FileCheck2 size={18} /><span>Auditoria</span></button>{role === 'admin' && <button className={view === 'maintenance' ? 'nav-item active' : 'nav-item'} onClick={() => setView('maintenance')}><Wrench size={18} /><span>Manutenção</span></button>}</div>}{role === 'analista' && <div className="role-switcher" style={{ marginTop: 18 }}><button className={view === 'main' ? 'nav-item active' : 'nav-item'} onClick={() => setView('main')}><ClipboardCheck size={18} /><span>Triagem e dossiê</span></button><button className={view === 'decisions' ? 'nav-item active' : 'nav-item'} onClick={() => setView('decisions')}><FileCheck2 size={18} /><span>Decisões</span>{pendingDecisions.length > 0 && <span className="pending-dot">{pendingDecisions.length}</span>}</button></div>}{role === 'vendedor' && <div className="role-switcher" style={{ marginTop: 18 }}><button className={view === 'main' ? 'nav-item active' : 'nav-item'} onClick={() => { setEditingRequest(null); setView('main') }}><FileText size={18} /><span>Novo cadastro</span></button><button className={view === 'requests' ? 'nav-item active' : 'nav-item'} onClick={() => setView('requests')}><ClipboardCheck size={18} /><span>Minhas solicitações</span></button></div>}<div className="sidebar-bottom"><div className="help-box"><span>Processo digital</span><small>Sem papel no dossiê</small><ArrowUpRight size={16} /></div><button type="button" className="version-tag" onClick={openChangelog}><Sparkles size={12} /> v{CURRENT_VERSION} · novidades</button></div></aside>
+    <main className="main-content">{user.impersonatedBy && <div className="impersonation-banner"><Wrench size={16} /><span><b>Modo de manutenção</b> · você está na conta de <b>{user.name}</b> ({roleLabel[user.role]}). Tudo o que fizer aqui fica registrado na auditoria em nome de {user.impersonatedBy.name}.</span><button type="button" onClick={endImpersonation}><ArrowLeft size={14} /> Voltar para o admin</button></div>}<header className="topbar"><button className="mobile-menu"><Menu size={21} /></button><div className="breadcrumb">Sis-Cred <span>/</span> <b>{view === 'maintenance' ? 'Manutenção' : view === 'audit' ? 'Auditoria' : view === 'users' ? 'Usuários' : view === 'decisions' ? 'Decisões' : view === 'requests' ? 'Minhas solicitações' : role === 'vendedor' ? 'Novo cadastro' : role === 'analista' ? 'Triagem e dossiê' : role === 'gestao' ? 'Decisão de crédito' : 'Administração'}</b></div><div className="top-actions">
         <div className="menu-wrap" ref={notifMenuRef}>
           <button type="button" className="icon-btn" onClick={() => { setNotifMenuOpen((open) => !open); setProfileMenuOpen(false) }}><Bell size={19} />{notifications.length > 0 && <i></i>}</button>
           {notifMenuOpen && <div className="dropdown-panel notif-panel">
@@ -484,12 +533,12 @@ function App() {
           </button>
           {profileMenuOpen && <div className="dropdown-panel profile-panel">
             <button type="button" className="dropdown-item" onClick={() => { setShowEditProfile(true); setProfileMenuOpen(false) }}><Pencil size={16} /> Editar perfil</button>
-            <button type="button" className="dropdown-item" onClick={() => { setShowChangePassword(true); setProfileMenuOpen(false) }}><ShieldCheck size={16} /> Trocar senha</button>
+            {!user.impersonatedBy && <button type="button" className="dropdown-item" onClick={() => { setShowChangePassword(true); setProfileMenuOpen(false) }}><ShieldCheck size={16} /> Trocar senha</button>}
             <button type="button" className="dropdown-item danger" onClick={logout}><LogOut size={16} /> Sair do sistema</button>
           </div>}
         </div>
       </div></header>
-      <div className="content-wrap"><div key={view} className="page-enter">{view === 'audit' && (role === 'admin' || role === 'gestao') ? <AuditView requests={items} /> : view === 'users' && (role === 'admin' || role === 'gestao') ? <UserManagementView isAdmin={role === 'admin'} currentUserId={user.id} /> : view === 'decisions' && role === 'analista' ? <DecisionsView pendingDecisions={pendingDecisions} historyDecisions={historyDecisions} onConfirmPratico={confirmPraticoUpdate} /> : view === 'requests' && role === 'vendedor' ? <SellerRequestsView requests={items} onNew={() => { setEditingRequest(null); setView('main') }} onEdit={(item) => { setEditingRequest(item); setView('main') }} /> : <>{role === 'vendedor' && <SellerForm key={editingRequest?.id ?? 'new'} initialRequest={editingRequest} onSubmit={editingRequest ? (form, file) => resendRequest(editingRequest.id, form, file) : createRequest} />}{role === 'analista' && <AnalystView requests={triageItems} selected={selected} setSelected={setSelected} onSend={() => updateStatus('AGUARDANDO_GESTAO')} onReturned={handleReturnedToSeller} />}{role === 'gestao' && <ManagementView requests={items.filter((item) => item.status === 'AGUARDANDO_GESTAO')} deniedItems={items.filter((item) => item.status === 'NEGADA')} onReloadRequests={loadRequests} selected={selected} setSelected={setSelected} decision={decision} onDecision={updateStatus} />}{role === 'admin' && <AdminView />}</>}</div></div></main>
+      <div className="content-wrap"><div key={view} className="page-enter">{view === 'maintenance' && role === 'admin' ? <MaintenanceView onOpenUsers={() => setView('users')} /> : view === 'audit' && (role === 'admin' || role === 'gestao') ? <AuditView requests={items} /> : view === 'users' && (role === 'admin' || role === 'gestao') ? <UserManagementView isAdmin={role === 'admin'} currentUserId={user.id} onImpersonate={role === 'admin' && !user.impersonatedBy ? startImpersonation : undefined} /> : view === 'decisions' && role === 'analista' ? <DecisionsView pendingDecisions={pendingDecisions} historyDecisions={historyDecisions} onConfirmPratico={confirmPraticoUpdate} /> : view === 'requests' && role === 'vendedor' ? <SellerRequestsView requests={items} maintenance={!!user.impersonatedBy} onNew={() => { setEditingRequest(null); setView('main') }} onEdit={(item) => { setEditingRequest(item); setView('main') }} /> : <>{role === 'vendedor' && <SellerForm key={editingRequest?.id ?? 'new'} initialRequest={editingRequest} maintenance={!!user.impersonatedBy && !!editingRequest && editingRequest.status !== 'DEVOLVIDA'} onSubmit={editingRequest ? (form, file) => resendRequest(editingRequest.id, form, file) : createRequest} />}{role === 'analista' && <AnalystView requests={triageItems} selected={selected} setSelected={setSelected} onSend={() => updateStatus('AGUARDANDO_GESTAO')} onReturned={handleReturnedToSeller} />}{role === 'gestao' && <ManagementView requests={items.filter((item) => item.status === 'AGUARDANDO_GESTAO')} deniedItems={items.filter((item) => item.status === 'NEGADA')} onReloadRequests={loadRequests} selected={selected} setSelected={setSelected} decision={decision} onDecision={updateStatus} />}{role === 'admin' && <AdminView />}</>}</div></div></main>
     {showChangePassword && <ChangePasswordModal onClose={() => setShowChangePassword(false)} onSuccess={() => { setShowChangePassword(false); pushToast('success', 'Senha atualizada com sucesso.') }} />}
     {showEditProfile && <EditProfileModal user={user} avatarSrc={avatarSrc} onClose={() => setShowEditProfile(false)} onSaved={saveProfilePatch} />}
     {burst && <ConfirmationBurst ok={burst.ok} title={burst.title} message={burst.message} onDone={() => setBurst(null)} />}
@@ -666,7 +715,8 @@ function ResetUserPasswordModal({ userName, onClose, onDone, onSubmit }: { userN
 
 type ManagedUser = { id: number; name: string; email: string; role: string; praticoSellerCode: string | null; storeName: string | null; managerName: string | null; whatsappPhone: string | null; active: number }
 
-function UserManagementView({ isAdmin, currentUserId }: { isAdmin: boolean; currentUserId: number }) {
+function UserManagementView({ isAdmin, currentUserId, onImpersonate }: { isAdmin: boolean; currentUserId: number; onImpersonate?: (token: string, user: AuthUser) => void }) {
+  const [impersonateTarget, setImpersonateTarget] = useState<ManagedUser | null>(null)
   const [users, setUsers] = useState<ManagedUser[]>([])
   const [showUserForm, setShowUserForm] = useState(false)
   const [resetTarget, setResetTarget] = useState<ManagedUser | null>(null)
@@ -703,6 +753,7 @@ function UserManagementView({ isAdmin, currentUserId }: { isAdmin: boolean; curr
           <span className="user-role">{managedUser.role}</span>
           <span className={managedUser.active ? 'access-active' : 'access-inactive'}><i></i>{managedUser.active ? 'Ativo' : 'Suspenso'}</span>
           <div className="user-actions">
+            {onImpersonate && managedUser.role !== 'ADMIN' && managedUser.id !== currentUserId && <button className="small-action maintenance" title="Entrar na conta deste usuário para manutenção" onClick={() => setImpersonateTarget(managedUser)}><Wrench size={11} /> Acessar como</button>}
             <button className="small-action" onClick={() => setEditTarget(managedUser)}>Editar</button>
             <button className="small-action" onClick={() => setResetTarget(managedUser)}>Trocar senha</button>
             <button className="small-action" onClick={() => toggleUser(managedUser.id)}>{managedUser.active ? 'Suspender' : 'Reativar'}</button>
@@ -714,8 +765,59 @@ function UserManagementView({ isAdmin, currentUserId }: { isAdmin: boolean; curr
     {showUserForm && <CreateUserModal roleOptions={roleOptions} onClose={() => setShowUserForm(false)} onCreated={() => { setShowUserForm(false); load(); pushToast('success', 'Usuário criado com acesso ativo.') }} />}
     {editTarget && <EditUserModal user={editTarget} roleOptions={roleOptions} onClose={() => setEditTarget(null)} onSaved={() => { setEditTarget(null); load(); pushToast('success', 'Cadastro do usuário atualizado com sucesso.') }} />}
     {resetTarget && <ResetUserPasswordModal userName={resetTarget.name} onClose={() => setResetTarget(null)} onSubmit={resetPassword} onDone={() => { setResetTarget(null); pushToast('success', 'Senha do usuário atualizada com sucesso.') }} />}
+    {impersonateTarget && onImpersonate && <ImpersonateUserModal target={impersonateTarget} onClose={() => setImpersonateTarget(null)} onStarted={(token, impersonated) => { setImpersonateTarget(null); onImpersonate(token, impersonated) }} />}
     {deleteTarget && <DeleteUserModal userName={deleteTarget.name} onClose={() => setDeleteTarget(null)} onSubmit={deleteUser} onDone={() => { setDeleteTarget(null); load(); pushToast('success', 'Usuário excluído com sucesso.') }} />}
   </>
+}
+
+function ImpersonateUserModal({ target, onClose, onStarted }: { target: ManagedUser; onClose: () => void; onStarted: (token: string, user: AuthUser) => void }) {
+  const [reason, setReason] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState('')
+  const submit = async () => {
+    if (reason.trim().length < 5) { setError('Descreva o motivo do acesso (mínimo 5 caracteres).'); return }
+    setSubmitting(true); setError('')
+    try {
+      const response = await apiFetch(`/api/admin/users/${target.id}/impersonate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reason: reason.trim() }) })
+      const body = await response.json().catch(() => null)
+      if (!response.ok) { setError(body?.message || 'Não foi possível acessar a conta.'); return }
+      onStarted(body.token, body.user)
+    } catch { setError('Não foi possível acessar a conta. Confira sua conexão e tente novamente.')
+    } finally { setSubmitting(false) }
+  }
+  return <div className="modal-backdrop"><div className="modal">
+    <div className="modal-head"><div><p className="eyebrow">MODO DE MANUTENÇÃO</p><h2>Acessar como {target.name}</h2></div><button type="button" onClick={onClose}><X size={19} /></button></div>
+    <p className="modal-copy">Você vai ver o sistema exatamente como <b>{target.name}</b> ({roleLabel[target.role as BackendRole] ?? target.role}) e poderá corrigir os dados dele. O acesso dura até 1 hora, fica registrado com o motivo abaixo e toda ação aparece na auditoria em seu nome. A senha do usuário não é alterada nem exibida.</p>
+    <label>Motivo do acesso<span className="required-mark">*</span><textarea rows={3} value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Ex.: vendedor relatou erro ao anexar o contrato social" autoFocus /></label>
+    {error && <div className="notice notice-error"><X size={17} /> {error}</div>}
+    <div className="modal-actions"><button type="button" className="cancel-btn" onClick={onClose}>Cancelar</button><button type="button" className="primary-btn" disabled={submitting} onClick={submit}><Wrench size={16} /> {submitting ? 'Entrando...' : 'Entrar na conta'}</button></div>
+  </div></div>
+}
+
+function MaintenanceView({ onOpenUsers }: { onOpenUsers: () => void }) {
+  return <><PageHeader eyebrow="ADMINISTRAÇÃO DO SISTEMA" title="Acesso de manutenção" subtitle="Entre na conta de um usuário para investigar erros e corrigir dados. Cada acesso fica registrado." /><MaintenanceAccessCard onOpenUsers={onOpenUsers} /></>
+}
+
+type AccessLogEntry = { id: number; action: 'INICIO' | 'FIM'; reason: string | null; ipAddress: string | null; createdAt: string; adminName: string; targetName: string; targetRole: BackendRole }
+function MaintenanceAccessCard({ onOpenUsers }: { onOpenUsers: () => void }) {
+  const [entries, setEntries] = useState<AccessLogEntry[] | null>(null)
+  const [expanded, setExpanded] = useState(false)
+  useEffect(() => { apiFetch('/api/admin/access-log').then((response) => (response.ok ? response.json() : [])).then(setEntries).catch(() => setEntries([])) }, [])
+  const visible = expanded ? entries ?? [] : (entries ?? []).slice(0, 15)
+  return <section className="admin-card maintenance-card">
+    <div className="card-heading">
+      <div><h2>Como acessar</h2><p>Em Usuários, clique em "Acessar como" no usuário desejado e informe o motivo.</p></div>
+      <button type="button" className="outline-btn" style={{ width: 'auto', margin: 0 }} onClick={onOpenUsers}><Wrench size={14} /> Escolher usuário</button>
+    </div>
+    <div className="form-section-title" style={{ marginTop: 14 }}>Acessos recentes</div>
+    {entries === null ? <p className="subheading" style={{ margin: 0 }}>Carregando...</p> : entries.length === 0 ? <p className="subheading" style={{ margin: 0 }}>Nenhum acesso de manutenção registrado.</p> : <>
+      {visible.map((entry) => <div className="check-line" key={entry.id}>
+        {entry.action === 'INICIO' ? <Wrench size={16} /> : <LogOut size={16} />}
+        <div><strong>{entry.adminName} {entry.action === 'INICIO' ? 'entrou na conta de' : 'saiu da conta de'} {entry.targetName} <span className="user-role">({roleLabel[entry.targetRole] ?? entry.targetRole})</span></strong><small>{formatDateTime(entry.createdAt)}{entry.reason ? ` · Motivo: ${entry.reason}` : ''}{entry.ipAddress ? ` · IP ${entry.ipAddress}` : ''}</small></div>
+      </div>)}
+      {entries.length > 15 && <button type="button" className="link-btn" style={{ marginTop: 6 }} onClick={() => setExpanded((value) => !value)}>{expanded ? 'Mostrar menos' : `Ver todos (${entries.length})`}</button>}
+    </>}
+  </section>
 }
 
 type UpdateCheckResult = { currentVersion: string; latestVersion: string; updateAvailable: boolean; commitsAhead: number | null; newChangelog: ChangelogEntry[] }
@@ -783,8 +885,15 @@ const auditEventLabel: Record<string, string> = {
   DECISAO_REABERTA: 'Decisão reaberta',
   SOLICITACAO_DEVOLVIDA: 'Cadastro devolvido ao vendedor',
   SOLICITACAO_REENVIADA: 'Cadastro reenviado pelo vendedor',
+  CORRECAO_MANUTENCAO: 'Correção em modo de manutenção',
 }
+// Ações feitas por um administrador dentro da conta de outro usuário ganham a marca de manutenção.
 const auditEventDetail = (event: AuditEvent): string => {
+  const impersonatedBy = event.eventData?.impersonatedBy as { name?: string } | undefined
+  const detail = baseAuditEventDetail(event)
+  return impersonatedBy ? `${detail} · feito por ${impersonatedBy.name} (modo de manutenção)` : detail
+}
+const baseAuditEventDetail = (event: AuditEvent): string => {
   const data = event.eventData
   if (!data) return '—'
   switch (event.eventType) {
@@ -797,6 +906,7 @@ const auditEventDetail = (event: AuditEvent): string => {
     case 'DECISAO_REABERTA': return `Reaberta e aprovada · ${money(Number(data.approvedLimit))}`
     case 'SOLICITACAO_DEVOLVIDA': return `Motivo: "${data.reason}"`
     case 'SOLICITACAO_REENVIADA': return 'Cadastro corrigido e reenviado para triagem'
+    case 'CORRECAO_MANUTENCAO': return 'Dados da ficha corrigidos pelo administrador'
     default: return '—'
   }
 }
@@ -965,13 +1075,15 @@ function AuditView({ requests }: { requests: Request[] }) {
       </div>
       <div className="form-section-title">Documentos do dossiê</div>
       {detailLoading ? <p className="modal-copy">Carregando...</p> : <div className="report-files">
-        {(['CONTRATO_SOCIAL', 'SERASA', 'DEPS'] as const).map((type) => {
-          const doc = detailDocuments.find((d) => d.documentType === type)
-          return <div className="report-file" key={type}>
+        {(['CONTRATO_SOCIAL', 'SERASA', 'DEPS'] as const).flatMap((type) => {
+          // O vendedor pode anexar vários PDFs de contrato social; Serasa e DEPS mostram só o mais recente.
+          const ofType = detailDocuments.filter((d) => d.documentType === type)
+          const docs: Array<DossierDocument | null> = ofType.length ? (type === 'CONTRATO_SOCIAL' ? ofType : ofType.slice(0, 1)) : [null]
+          return docs.map((doc) => <div className="report-file" key={doc ? doc.id : type}>
             <div className={'report-icon ' + (type === 'SERASA' ? 'serasa' : 'deps')}><FileText size={18} /></div>
             <div><strong>{documentLabel[type]}</strong><small>{doc ? `${doc.originalName} · enviado por ${doc.uploadedByName}` : 'Não enviado'}</small></div>
             {doc ? <button type="button" className="small-action" onClick={() => viewDocument(doc.id)}>Visualizar</button> : <span className="pending-dot">!</span>}
-          </div>
+          </div>)
         })}
       </div>}
       {(detail.status === 'APROVADA' || detail.status === 'NEGADA') && <>
@@ -1115,11 +1227,11 @@ function ResetPasswordScreen({ token, onDone }: { token: string; onDone: () => v
 }
 
 function PageHeader({ eyebrow, title, subtitle, action }: { eyebrow: string; title: string; subtitle: string; action?: ReactNode }) { return <div className="page-heading"><div><p className="eyebrow">{eyebrow}</p><h1>{title}</h1><p className="subheading">{subtitle}</p></div>{action}</div> }
-function SellerRequestsView({ requests, onNew, onEdit }: { requests: Request[]; onNew: () => void; onEdit: (item: Request) => void }) {
+function SellerRequestsView({ requests, maintenance, onNew, onEdit }: { requests: Request[]; maintenance: boolean; onNew: () => void; onEdit: (item: Request) => void }) {
   const [detail, setDetail] = useState<Request | null>(null)
   return <><PageHeader eyebrow="ÁREA DO VENDEDOR" title="Minhas solicitações" subtitle="Acompanhe o andamento dos clientes enviados. Clique em um cliente para ver o processo e o resultado." action={<button className="primary-btn" onClick={onNew}><Plus size={18} /> Nova ficha cadastral</button>} />
     <div className="seller-list">{requests.length ? requests.map((item) => <button type="button" className="seller-request" key={item.id} onClick={() => setDetail(item)} style={{ width: '100%', textAlign: 'left', font: 'inherit', cursor: 'pointer' }}><div className="case-avatar blue">{item.companyName.slice(0, 2)}</div><div><strong>{item.companyName}</strong><small>Código Prático: {item.clientCode} · {item.cnpj} · {item.protocol}</small></div><span className={'status ' + (item.status === 'APROVADA' ? 'green' : item.status === 'NEGADA' || item.status === 'DEVOLVIDA' ? 'red' : 'blue')}><i></i>{statusLabel[item.status]}</span></button>) : <p className="subheading">Nenhuma solicitação enviada ainda.</p>}</div>
-    {detail && <SellerRequestDetailModal request={detail} onClose={() => setDetail(null)} onEdit={onEdit} />}
+    {detail && <SellerRequestDetailModal request={detail} maintenance={maintenance} onClose={() => setDetail(null)} onEdit={onEdit} />}
   </>
 }
 
@@ -1131,7 +1243,7 @@ const sellerProcessSteps = [
 ]
 const sellerStepIndex: Record<Status, number> = { RECEBIDA: 0, EM_ANALISE: 1, AGUARDANDO_GESTAO: 2, APROVADA: 3, NEGADA: 3, DEVOLVIDA: 0 }
 
-function SellerRequestDetailModal({ request, onClose, onEdit }: { request: Request; onClose: () => void; onEdit: (item: Request) => void }) {
+function SellerRequestDetailModal({ request, maintenance, onClose, onEdit }: { request: Request; maintenance: boolean; onClose: () => void; onEdit: (item: Request) => void }) {
   const [decisionDetail, setDecisionDetail] = useState<DecisionDetail | null>(null)
   const [loading, setLoading] = useState(false)
   const isDecided = request.status === 'APROVADA' || request.status === 'NEGADA'
@@ -1167,6 +1279,7 @@ function SellerRequestDetailModal({ request, onClose, onEdit }: { request: Reque
       <p className="modal-copy">{request.returnReason || '—'}</p>
       <button type="button" className="primary-btn full" onClick={() => onEdit(request)}><Pencil size={16} /> Editar e reenviar</button>
     </> : <p className="modal-copy">Sua solicitação está em andamento. Assim que a gestão decidir, o resultado e a justificativa aparecerão aqui.</p>}
+    {maintenance && !isReturned && <button type="button" className="outline-btn" onClick={() => onEdit(request)}><Wrench size={15} /> Corrigir dados (manutenção)</button>}
     <div className="modal-actions"><button type="button" className="cancel-btn" onClick={onClose}>Fechar</button></div>
   </div></div>
 }
@@ -1179,7 +1292,7 @@ const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const splitEmails = (value: string | null): string[] =>
   (value || '').split(/[;,]+/).map((part) => part.trim()).filter((part) => emailPattern.test(part))
 
-function SellerForm({ onSubmit, initialRequest }: { onSubmit: (form: HTMLFormElement, contractFile: File | null) => Promise<string | null>; initialRequest?: Request | null }) {
+function SellerForm({ onSubmit, initialRequest, maintenance = false }: { onSubmit: (form: HTMLFormElement, contractFiles: File[]) => Promise<string | null>; initialRequest?: Request | null; maintenance?: boolean }) {
   const isEditing = !!initialRequest
   const initialNames = splitMultiple(initialRequest?.contactName ?? null)
   const initialPhones = splitMultiple(initialRequest?.phone ?? null)
@@ -1194,7 +1307,16 @@ function SellerForm({ onSubmit, initialRequest }: { onSubmit: (form: HTMLFormEle
   const [submitting, setSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState('')
   const [deliveryLocation, setDeliveryLocation] = useState(initialRequest?.deliveryLocation === 'Outro endereço' ? 'Outro endereço' : 'Endereço da empresa')
-  const [contractFile, setContractFile] = useState<File | null>(null)
+  const [contractFiles, setContractFiles] = useState<File[]>([])
+  const [fileError, setFileError] = useState('')
+  // Aceita só PDFs e ignora arquivos repetidos (mesmo nome e tamanho) já anexados.
+  const addContractFiles = (list: FileList | null) => {
+    const incoming = Array.from(list || [])
+    const pdfs = incoming.filter((file) => (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) && file.size <= 15 * 1024 * 1024)
+    setFileError(pdfs.length < incoming.length ? 'Apenas arquivos PDF de até 15 MB são aceitos. Os demais foram ignorados.' : '')
+    setContractFiles((current) => [...current, ...pdfs.filter((file) => !current.some((existing) => existing.name === file.name && existing.size === file.size))])
+  }
+  const removeContractFile = (index: number) => setContractFiles((current) => current.filter((_, i) => i !== index))
   const [nameIds, setNameIds] = useState(() => initialNames.map((_, index) => index))
   const [phoneIds, setPhoneIds] = useState(() => initialPhones.map((_, index) => index))
   const [emailIds, setEmailIds] = useState(() => initialEmails.map((_, index) => index))
@@ -1282,22 +1404,22 @@ function SellerForm({ onSubmit, initialRequest }: { onSubmit: (form: HTMLFormEle
 
   const resetForm = (form: HTMLFormElement) => {
     form.reset()
-    setCnpj(initialRequest ? formatDocument(initialRequest.cnpj) : ''); setContractFile(null)
+    setCnpj(initialRequest ? formatDocument(initialRequest.cnpj) : ''); setContractFiles([]); setFileError('')
     setLookupValue(''); setLookupResults([]); setLookupError(''); setLookupFilled('')
     setDeliveryLocation(initialRequest?.deliveryLocation === 'Outro endereço' ? 'Outro endereço' : 'Endereço da empresa')
     setNameIds(initialNames.map((_, index) => index)); setPhoneIds(initialPhones.map((_, index) => index)); setEmailIds(initialEmails.map((_, index) => index))
   }
 
   const submit = async (form: HTMLFormElement) => {
-    if (!contractFile && !isEditing) { setSubmitError('Anexe o contrato social ou certificado de empresário individual (PDF).'); return }
+    if (!contractFiles.length && !isEditing) { setSubmitError('Anexe o contrato social ou certificado de empresário individual (PDF).'); return }
     setSubmitting(true); setSubmitError('')
-    const error = await onSubmit(form, contractFile)
+    const error = await onSubmit(form, contractFiles)
     if (error) setSubmitError(error); else if (!isEditing) resetForm(form)
     setSubmitting(false)
   }
 
   return <form className="form-page" ref={formRef} onSubmit={(event) => { event.preventDefault(); submit(event.currentTarget) }}>
-    <PageHeader eyebrow="FICHA CADASTRAL DIGITAL" title={isEditing ? 'Corrigir e reenviar cadastro' : 'Novo cadastro de cliente'} subtitle={isEditing ? 'Ajuste as informações apontadas pela analista e reenvie para uma nova triagem.' : 'Para atender sua solicitação com rapidez e sem erros, preencha todos os campos abaixo.'} />
+    <PageHeader eyebrow={maintenance ? `MODO DE MANUTENÇÃO · ${initialRequest?.protocol ?? ''}` : 'FICHA CADASTRAL DIGITAL'} title={maintenance ? 'Corrigir dados da solicitação' : isEditing ? 'Corrigir e reenviar cadastro' : 'Novo cadastro de cliente'} subtitle={maintenance ? `Status atual: ${statusLabel[initialRequest!.status]}. A correção fica registrada na auditoria e não muda o andamento da solicitação.` : isEditing ? 'Ajuste as informações apontadas pela analista e reenvie para uma nova triagem.' : 'Para atender sua solicitação com rapidez e sem erros, preencha todos os campos abaixo.'} />
     {isEditing && initialRequest?.returnReason && <div className="notice notice-error"><X size={17} /> Motivo da devolução: {initialRequest.returnReason}</div>}
 
     <div className="form-section">
@@ -1369,16 +1491,23 @@ function SellerForm({ onSubmit, initialRequest }: { onSubmit: (form: HTMLFormEle
 
     <div className="form-section">
       <div className="form-section-head"><div className="form-section-icon"><Paperclip size={16} /></div><div><h3>Documentos e observações</h3><p>Contrato social e informações finais</p></div></div>
-      <button type="button" className={contractFile ? 'upload-dropzone filled' : 'upload-dropzone'} onClick={() => contractInputRef.current?.click()} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); const file = event.dataTransfer.files?.[0]; if (file) setContractFile(file) }}>
-        <div className="upload-dropzone-icon">{contractFile ? <FileCheck2 size={18} /> : <UploadCloud size={18} />}</div>
-        <div><strong>{contractFile ? contractFile.name : isEditing ? 'Trocar contrato social ou certificado de empresário individual (opcional)' : <>Anexar contrato social ou certificado de empresário individual<span className="required-mark">*</span></>}</strong><small>{contractFile ? 'Clique para trocar o arquivo' : isEditing ? 'Só anexe se precisar substituir o arquivo já enviado' : 'Clique aqui ou arraste o PDF'}</small></div>
+      <button type="button" className={contractFiles.length ? 'upload-dropzone filled' : 'upload-dropzone'} onClick={() => contractInputRef.current?.click()} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); addContractFiles(event.dataTransfer.files) }}>
+        <div className="upload-dropzone-icon">{contractFiles.length ? <FileCheck2 size={18} /> : <UploadCloud size={18} />}</div>
+        <div><strong>{contractFiles.length ? `${contractFiles.length} PDF${contractFiles.length > 1 ? 's' : ''} anexado${contractFiles.length > 1 ? 's' : ''}` : isEditing ? 'Anexar novos documentos (opcional)' : <>Anexar contrato social ou certificado de empresário individual<span className="required-mark">*</span></>}</strong><small>{contractFiles.length ? 'Clique aqui ou arraste para adicionar mais PDFs' : isEditing ? 'Os documentos já enviados continuam no dossiê' : 'Clique aqui ou arraste um ou mais PDFs'}</small></div>
       </button>
-      <input ref={contractInputRef} type="file" accept="application/pdf" style={{ display: 'none' }} onChange={(event) => setContractFile(event.target.files?.[0] || null)} />
+      <input ref={contractInputRef} type="file" accept="application/pdf" multiple style={{ display: 'none' }} onChange={(event) => { addContractFiles(event.target.files); event.target.value = '' }} />
+      {fileError && <div className="notice notice-error" style={{ marginTop: 10 }}><X size={17} /> {fileError}</div>}
+      {contractFiles.length > 0 && <div className="attached-files">
+        {contractFiles.map((file, index) => <div className="attached-file" key={`${file.name}-${file.size}`}>
+          <FileText size={15} /><span>{file.name}</span><small>{(file.size / 1024 / 1024).toLocaleString('pt-BR', { maximumFractionDigits: 1 })} MB</small>
+          <button type="button" className="remove-field-btn" title="Remover arquivo" onClick={() => removeContractFile(index)}><Trash2 size={14} /></button>
+        </div>)}
+      </div>}
       <label style={{ marginTop: 14 }}>Observações do vendedor<textarea name="sellerNotes" rows={3} placeholder="Contato negociado, responsáveis e outras informações relevantes" defaultValue={initialRequest?.sellerNotes ?? ''}></textarea></label>
     </div>
 
     {submitError && <div className="notice notice-error"><X size={17} /> {submitError}</div>}
-    <div className="form-page-actions"><button type="button" className="cancel-btn" onClick={() => formRef.current && resetForm(formRef.current)}>Limpar formulário</button><button type="submit" className="primary-btn" disabled={submitting}><Send size={17} /> {submitting ? (isEditing ? 'Reenviando...' : 'Enviando...') : isEditing ? 'Reenviar para análise' : 'Enviar para análise'}</button></div>
+    <div className="form-page-actions"><button type="button" className="cancel-btn" onClick={() => formRef.current && resetForm(formRef.current)}>Limpar formulário</button><button type="submit" className="primary-btn" disabled={submitting}><Send size={17} /> {submitting ? (maintenance ? 'Salvando...' : isEditing ? 'Reenviando...' : 'Enviando...') : maintenance ? 'Salvar correção' : isEditing ? 'Reenviar para análise' : 'Enviar para análise'}</button></div>
   </form>
 }
 type DecisionDetail = { protocol: string; companyName: string; decision: 'APROVADA' | 'NEGADA'; approvedLimit: number | null; internalReason: string | null; clientMessage: string | null; decidedAt: string; managerName: string }
@@ -1478,7 +1607,7 @@ function AnalystView({ requests, selected, setSelected, onSend, onReturned }: { 
   const [showReturnModal, setShowReturnModal] = useState(false)
   const pushToast = useToast()
   useEffect(() => { if (selected.id) listDocuments(selected.id).then(setRequestDocuments); else setRequestDocuments([]) }, [selected.id])
-  const contractDoc = requestDocuments.find((d) => d.documentType === 'CONTRATO_SOCIAL')
+  const contractDocs = requestDocuments.filter((d) => d.documentType === 'CONTRATO_SOCIAL')
   const serasaDoc = requestDocuments.find((d) => d.documentType === 'SERASA')
   const depsDoc = requestDocuments.find((d) => d.documentType === 'DEPS')
   const handleUpload = async (documentType: 'SERASA' | 'DEPS', file: File | undefined) => {
@@ -1528,7 +1657,7 @@ function AnalystView({ requests, selected, setSelected, onSend, onReturned }: { 
             <div className="form-section-icon"><FileCheck2 size={16} /></div>
             <div><h2>Documentos enviados pelo vendedor</h2><p>Contrato social ou certificado de empresário individual</p></div>
           </div>
-          <div className="report-files"><ReportFile icon="deps" name="Contrato social / Certificado MEI" detail={contractDoc ? `${contractDoc.originalName} · anexado pelo vendedor` : 'Não anexado pelo vendedor'} complete={!!contractDoc} onClick={() => contractDoc && viewDocument(contractDoc.id)} /></div>
+          <div className="report-files">{contractDocs.length ? contractDocs.map((doc) => <ReportFile key={doc.id} icon="deps" name="Contrato social / Certificado MEI" detail={`${doc.originalName} · anexado pelo vendedor`} complete onClick={() => viewDocument(doc.id)} />) : <ReportFile icon="deps" name="Contrato social / Certificado MEI" detail="Não anexado pelo vendedor" complete={false} onClick={() => {}} />}</div>
         </section>
 
         <section className="review-card" style={{ marginTop: 16 }}>

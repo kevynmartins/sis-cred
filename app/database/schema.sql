@@ -122,6 +122,19 @@ CREATE TABLE IF NOT EXISTS audit_events (
   INDEX idx_audit_request (request_id)
 ) ENGINE=InnoDB;
 
+CREATE TABLE IF NOT EXISTS admin_access_log (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  admin_id INT UNSIGNED NOT NULL,
+  target_user_id INT UNSIGNED NOT NULL,
+  action ENUM('INICIO', 'FIM') NOT NULL,
+  reason VARCHAR(255) NULL,
+  ip_address VARCHAR(64) NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_access_log_admin FOREIGN KEY (admin_id) REFERENCES users(id),
+  CONSTRAINT fk_access_log_target FOREIGN KEY (target_user_id) REFERENCES users(id),
+  INDEX idx_access_log_created (created_at)
+) ENGINE=InnoDB;
+
 -- Nenhum usuário é criado por este schema. Para gerar o primeiro administrador (com senha
 -- própria, não uma senha padrão conhecida), veja database/seed-dev-users.sql — use-o apenas
 -- em ambiente de desenvolvimento/teste, nunca em produção.
