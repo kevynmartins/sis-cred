@@ -110,23 +110,6 @@ CREATE TABLE IF NOT EXISTS notifications (
   CONSTRAINT fk_notifications_recipient FOREIGN KEY (recipient_user_id) REFERENCES users(id)
 ) ENGINE=InnoDB;
 
--- request_id fica NULLABLE porque a trilha também registra a área de atualização de
--- dados, que não pertence a nenhuma solicitação de crédito (data_update_id).
-CREATE TABLE IF NOT EXISTS audit_events (
-  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  request_id INT UNSIGNED NULL,
-  data_update_id INT UNSIGNED NULL,
-  actor_id INT UNSIGNED NOT NULL,
-  event_type VARCHAR(80) NOT NULL,
-  event_data JSON NULL,
-  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  CONSTRAINT fk_audit_request FOREIGN KEY (request_id) REFERENCES credit_requests(id) ON DELETE CASCADE,
-  CONSTRAINT fk_audit_data_update FOREIGN KEY (data_update_id) REFERENCES client_data_updates(id) ON DELETE CASCADE,
-  CONSTRAINT fk_audit_actor FOREIGN KEY (actor_id) REFERENCES users(id),
-  INDEX idx_audit_request (request_id),
-  INDEX idx_audit_data_update (data_update_id)
-) ENGINE=InnoDB;
-
 -- Área "Atualização de dados" do vendedor: correções de contato e endereço que não
 -- passam pela fila de limite de crédito. A gravação no Prático é sempre feita por
 -- uma pessoa (a analista), que então confirma ou descarta o registro.
@@ -164,6 +147,23 @@ CREATE TABLE IF NOT EXISTS client_data_updates (
   INDEX idx_data_updates_status (status),
   INDEX idx_data_updates_client (client_code),
   INDEX idx_data_updates_registered (registered_at)
+) ENGINE=InnoDB;
+
+-- request_id fica NULLABLE porque a trilha também registra a área de atualização de
+-- dados, que não pertence a nenhuma solicitação de crédito (data_update_id).
+CREATE TABLE IF NOT EXISTS audit_events (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  request_id INT UNSIGNED NULL,
+  data_update_id INT UNSIGNED NULL,
+  actor_id INT UNSIGNED NOT NULL,
+  event_type VARCHAR(80) NOT NULL,
+  event_data JSON NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_audit_request FOREIGN KEY (request_id) REFERENCES credit_requests(id) ON DELETE CASCADE,
+  CONSTRAINT fk_audit_data_update FOREIGN KEY (data_update_id) REFERENCES client_data_updates(id) ON DELETE CASCADE,
+  CONSTRAINT fk_audit_actor FOREIGN KEY (actor_id) REFERENCES users(id),
+  INDEX idx_audit_request (request_id),
+  INDEX idx_audit_data_update (data_update_id)
 ) ENGINE=InnoDB;
 
 CREATE TABLE IF NOT EXISTS admin_access_log (
