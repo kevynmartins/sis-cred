@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
-import { Activity, ArrowLeft, ArrowUpRight, Bell, Building2, Camera, Check, CheckCircle2, ChevronDown, ChevronUp, ClipboardCheck, ClipboardList, Download, Eye, FileCheck2, FileText, Info, LogOut, Menu, MessageSquareText, Paperclip, Pencil, Phone, Plus, RotateCcw, Search, Send, ShieldCheck, Sparkles, Trash2, UploadCloud, Users, Wrench, X, XCircle } from 'lucide-react'
+import { Activity, ArrowLeft, ArrowUpRight, Bell, Building2, Camera, Check, CheckCircle2, ChevronDown, ChevronUp, ClipboardCheck, ClipboardList, Download, Eye, FileCheck2, FileText, Info, LogOut, Mail, MapPin, Menu, MessageSquareText, Paperclip, Pencil, Phone, Plus, RotateCcw, Search, Send, ShieldCheck, Sparkles, Trash2, UploadCloud, UserRound, Users, Wrench, X, XCircle } from 'lucide-react'
 import './App.css'
 import versionData from '../version.json'
 
@@ -62,6 +62,193 @@ const formatDocument = (raw: string) => {
   return alnum.replace(/^(\d{3})(\d)/, '$1.$2').replace(/^(\d{3})\.(\d{3})(\d)/, '$1.$2.$3').replace(/\.(\d{3})(\d{1,2})$/, '.$1-$2')
 }
 type PraticoClient = { clientCode: string; companyCode: number | null; personType: 'F' | 'J'; document: string | null; companyName: string | null; tradeName: string | null; stateRegistration: string | null; phones: string[]; email: string | null; contactName: string | null; address: string | null }
+
+// Área "Atualização de dados": correção de contato e endereço que NÃO entra na fila
+// de limite de crédito. O registro sai daqui como "Registrada" e só a analista confirma
+// (ou descarta) depois de alterar o cadastro no sistema Prático.
+type DataUpdateStatus = 'REGISTRADA' | 'CONFIRMADA' | 'DESCARTADA'
+type ClientDataUpdate = {
+  id: number; reference: string; clientCode: string; cnpj: string | null; companyName: string
+  contactName: string | null; phone: string | null; phoneMobile: string | null; email: string | null
+  invoiceEmail: string | null; financeEmail: string | null
+  street: string | null; streetNumber: string | null; streetComplement: string | null
+  district: string | null; city: string | null; state: string | null; zipCode: string | null; notes: string | null
+  status: DataUpdateStatus; registeredAt: string; reviewedAt: string | null; reviewNotes: string | null
+  rejectionReason: string | null; sellerId: number; sellerName: string; sellerEmail: string; reviewerName: string | null
+}
+type PraticoCurrentContact = {
+  contactName: string | null; phones: string[]; email: string | null
+  street: string | null; district: string | null; city: string | null; state: string | null; zipCode: string | null
+}
+const dataUpdateStatusLabel: Record<DataUpdateStatus, string> = { REGISTRADA: 'Registrada', CONFIRMADA: 'Confirmada no Prático', DESCARTADA: 'Descartada' }
+const formatZipCode = (raw: string) => {
+  const digits = raw.replace(/\D/g, '').slice(0, 8)
+  return digits.length > 5 ? `${digits.slice(0, 5)}-${digits.slice(5)}` : digits
+}
+const formatState = (raw: string) => raw.replace(/[^A-Za-z]/g, '').toUpperCase().slice(0, 2)
+// O Prático devolve o endereço numa linha única ("RUA JOAO SACHETT N 800, CARAVAGIO,
+// NOVA VENEZA/SC, CEP 88865-000"). Aqui separamos em logradouro/número, bairro, cidade,
+// UF e CEP para o formulário de atualização ter um campo por dado. A ordem dos campos
+// varia entre cadastros, então o texto é classificado por formato em vez de posição.
+type ParsedAddress = { street: string; streetNumber: string; streetComplement: string; district: string; city: string; state: string; zipCode: string }
+const parsePraticoAddress = (raw: string | null): ParsedAddress => {
+  const result: ParsedAddress = { street: '', streetNumber: '', streetComplement: '', district: '', city: '', state: '', zipCode: '' }
+  if (!raw) return result
+  const parts = raw.split(/[,;]/).map((part) => part.trim()).filter(Boolean)
+  const cityCandidates: string[] = []
+  for (const part of parts) {
+    const cep = part.match(/^CEP[:\s]*([\d-]+)/i) || part.match(/\b(\d{5}-?\d{3})\b/)
+    if (cep) { result.zipCode = formatZipCode(cep[1]); continue }
+    // "NOVA VENEZA/SC" → cidade e UF na mesma parte
+    const cidadeUf = part.match(/^([^/]+?)\s*\/\s*([A-Za-z]{2})$/)
+    if (cidadeUf) { result.city = cidadeUf[1].trim(); result.state = cidadeUf[2].toUpperCase(); continue }
+    // Uma parte iniciada por sigla de via (RUA, ROD., AV., R., ...) é o logradouro.
+    // Sem essa âncora o heuristics erra: "NOVA BRASILIA" é bairro, não endereço.
+    const via = part.match(/^(RUA|ROD|AV|AVE|AVENIDA|ESTRADA|TRAVESSA|ALAMEDA|AL|PCA|PRACA)\b\.?\s+(.+)$/i)
+    if (via) { result.street = part; continue }
+    // Parte só com número é o número do endereço. O Prático às vezes traz "1387/1404"
+    // (número e sala) — nesse caso o campo de número guarda os dois, como no cadastro.
+    const soNumero = part.match(/^(\d+(?:\s*[-/]\s*\d+)?)\s*$/)
+    if (soNumero) { result.streetNumber = soNumero[1].replace(/\s+/g, ''); continue }
+    // Qualquer outra parte é bairro ou cidade — só dá para dizer qual depois de saber
+    // que a cidade sempre vem com UF ou é a última parte não atribuída.
+    cityCandidates.push(part)
+  }
+  // O número às vezes vem grudado no logradouro ("RUA JOAO SACHETT N 800").
+  if (!result.streetNumber && result.street) {
+    const glued = result.street.match(/^(.+?)\s+N[º°o]?\.?\s*(\d+(?:\s*[-/]\s*\d+)?)\s*$/i)
+    if (glued) {
+      result.street = glued[1].trim()
+      result.streetNumber = glued[2].replace(/\s+/g, '')
+    }
+  }
+  // Sobrou mais de uma parte: a que estiverde UF já é a cidade; as demais
+  // são bairro. Sobrou uma só, sem UF: pode ser bairro ou cidade — nesse caso tratamos
+  // como bairro, que é o caso mais comum quando o cadastro não traz cidade/UF.
+  if (cityCandidates.length) {
+    const hasUf = result.state.length === 2
+    if (cityCandidates.length === 1 && hasUf) { result.district = cityCandidates[0] }
+    else if (!hasUf) {
+      result.district = cityCandidates[0]
+      if (cityCandidates.length > 1) result.city = cityCandidates[1]
+    } else { result.district = cityCandidates[0] }
+  }
+  return result
+}
+// Os campos que o vendedor pediu para alterar, com o valor informado e o que está no
+// Prático no momento. "difere" marca o que a analista realmente precisa alterar: ou o
+// valor pedido é diferente do que está lá, ou o campo ainda não existe no cadastro.
+// A comparação ignora formatação (máscara de telefone/CEP, caixa) para não acusar
+// diferença onde o dado é o mesmo.
+type DataUpdateField = { key: string; label: string; group: string; pedido: string | null; atual: string; difere: boolean }
+const onlyDigits = (value: string) => value.replace(/\D/g, '')
+// Compara ignorando caixa, espaços extras e a pontuação das siglas de via — no Prático
+// a mesma rua aparece como "ROD. JOSE SPILLERE", "RUA JOAO SACHETT" ou "R. JOAO SACHETT".
+const normalizeText = (value: string) => value
+  .trim()
+  .toLowerCase()
+  .replace(/\b(rua|rod|av|ave|avenida|estrada|alameda|al|travessa|pca|praca)\b\.+/g, '$1')
+  .replace(/[^\p{L}\p{N}]+/gu, ' ')
+  .replace(/\s+/g, ' ')
+  .trim()
+
+// O Prático grava "RUA JOAO SACHETT N 800" ou "ROD. JOSE SPILLERE, 1387/1404": o número
+// (e a sala, quando existe) estão dentro do logradouro. Aqui separamos para comparar
+// cada campo do formulário com o que está lá de fato.
+const splitStreetNumber = (street: string | null | undefined) => {
+  const match = (street || '').trim().match(/^(.*?)[,\s]+N?[º°o]?\.?\s*(\d+(?:\s*[-/]\s*\d+)?)\s*$/i)
+  if (!match) return { street: (street || '').trim(), number: '', complement: '' }
+  const numero = match[2].replace(/\s+/g, '')
+  const partes = numero.split(/[-/]/)
+  return {
+    street: match[1].trim().replace(/[,\s]+$/, ''),
+    number: partes[0] || '',
+    complement: partes.slice(1).join('/') || '',
+  }
+}
+
+// O Prático costuma gravar o número grudado no logradouro ("RUA JOAO SACHETT N 800"),
+// enquanto o formulário de atualização guarda "logradouro" e "número" em campos separados.
+// Sem esta equivalência, a linha do logradouro apareceria como alteração à toa em quase
+// todo cadastro — o endereço é o mesmo, só mudou onde a informação está. O mesmo vale
+// para o complemento ("1387/1404") e para a pontuação em geral.
+// Siglas de via equivalentes: no Prático e no formulário a mesma rua pode aparecer
+// como "RUA", "R." ou "R" — todas significam o mesmo logradouro.
+const streetPrefixes: Record<string, string> = { r: 'rua', rua: 'rua', rod: 'rod', rodo: 'rod', av: 'av', ave: 'av', avenida: 'av', al: 'al', alameda: 'alameda', estr: 'estr', estrada: 'estrada', trav: 'trav', travessa: 'travessa', pc: 'praca', praca: 'praca' }
+const streetMatches = (pedidoStreet: string, pedidoNumber: string, atualStreet: string) => {
+  // O alvo é o logradouro do Prático já SEM o número — comparar com a string inteira
+  // nunca bateria, porque lá o número vem grudado ("RUA JOAO SACHETT N 800").
+  const alvo = normalizeText(splitStreetNumber(atualStreet).street)
+  if (!alvo) return false
+  // O número do Prático é só o que ficou depois do logradouro, não todos os dígitos da
+  // string (que em "1387/1404" somariam número e sala).
+  // Zeros à esquerda não mudam o número: "0800" e "800" são o mesmo endereço.
+  const numeroNaRua = onlyDigits(splitStreetNumber(atualStreet).number).replace(/^0+/, '')
+  const numeroPedido = onlyDigits(pedidoNumber).replace(/^0+/, '')
+  const pedidoNormalizado = normalizeText(pedidoStreet)
+  const siglaPedido = streetPrefixes[pedidoNormalizado.split(' ')[0]]
+  const siglaAlvo = streetPrefixes[alvo.split(' ')[0]]
+  const mesmaSigla = siglaPedido && siglaAlvo ? siglaPedido === siglaAlvo : pedidoNormalizado === alvo
+  const logradouroIgual = mesmaSigla && pedidoNormalizado.split(' ').slice(1).join(' ') === alvo.split(' ').slice(1).join(' ')
+  if (!numeroPedido) return logradouroIgual
+  if (numeroNaRua) return numeroPedido === numeroNaRua && logradouroIgual
+  // Número só no formulário: o endereço é o mesmo, mas o Prático não traz o número —
+  // então o logradouro não é alteração e o número é campo a preencher.
+  return logradouroIgual
+}
+const sameValue = (key: string, pedido: string | null, atual: string, context?: { number?: string | null; complement?: string | null }) => {
+  if (!pedido) return true
+  const a = normalizeText(pedido)
+  const b = normalizeText(atual || '')
+  if (a === b) return true
+  if (key === 'phone' || key === 'phoneMobile' || key === 'zipCode' || key === 'streetNumber' || key === 'streetComplement') {
+    const wanted = onlyDigits(pedido).replace(/^0+/, '')
+    const found = onlyDigits(atual).replace(/^0+/, '')
+    return wanted !== '' && wanted === found
+  }
+  if (key === 'street') return streetMatches(pedido, context?.number ?? '', atual)
+  return false
+}
+const dataUpdateFieldsOf = (item: ClientDataUpdate, current: PraticoCurrentContact | null): DataUpdateField[] => {
+  const emails = [
+    { key: 'email', label: 'E-mail principal' },
+    { key: 'invoiceEmail', label: 'E-mail para NFe' },
+    { key: 'financeEmail', label: 'E-mail financeiro' },
+  ].map(({ key, label }) => ({ key, label, group: 'E-mails', pedido: item[key as 'email' | 'invoiceEmail' | 'financeEmail'], atual: current?.email ?? '' }))
+  const phones = [
+    { key: 'phone', label: 'Telefone', pedido: item.phone, atual: current?.phones?.[0] ?? '' },
+    { key: 'phoneMobile', label: 'Celular', pedido: item.phoneMobile, atual: current?.phones?.[1] ?? '' },
+  ]
+  const ruaDoPratico = splitStreetNumber(current?.street)
+  const address = [
+    { key: 'street', label: 'Logradouro', pedido: item.street, atual: current?.street ?? '' },
+    { key: 'streetNumber', label: 'Número', pedido: item.streetNumber, atual: ruaDoPratico.number },
+    { key: 'streetComplement', label: 'Complemento', pedido: item.streetComplement, atual: ruaDoPratico.complement },
+    { key: 'district', label: 'Bairro', pedido: item.district, atual: current?.district ?? '' },
+    { key: 'city', label: 'Cidade', pedido: item.city, atual: current?.city ?? '' },
+    { key: 'state', label: 'UF', pedido: item.state, atual: current?.state ?? '' },
+    { key: 'zipCode', label: 'CEP', pedido: item.zipCode, atual: current?.zipCode ?? '' },
+  ]
+  const contato = [{ key: 'contactName', label: 'Contato', group: 'Contato', pedido: item.contactName, atual: current?.contactName ?? '' }]
+  const all = [
+    ...contato,
+    ...phones.map((row) => ({ ...row, group: 'Telefones' })),
+    ...emails,
+    ...address.map((row) => ({ ...row, group: 'Endereço' })),
+  ]
+  // O número e o complemento vão junto porque o Prático costuma gravá-los dentro do
+  // logradouro — sem isso, "RUA X" + número 800 seria acusado contra "RUA X N 800".
+  return all.map((row) => ({ ...row, difere: !sameValue(row.key, row.pedido, row.atual, { number: item.streetNumber, complement: item.streetComplement }) }))
+}
+const dataUpdateGroupOrder = ['Contato', 'Telefones', 'E-mails', 'Endereço']
+const dataUpdateChangeCount = (fields: DataUpdateField[]) => fields.filter((row) => row.difere).length
+
+const listDataUpdate = async (): Promise<ClientDataUpdate[]> => {
+  const response = await apiFetch('/api/client-data-updates')
+  if (!response.ok) throw new Error('Falha ao carregar atualizações de dados')
+  return response.json()
+}
+
 const initials = (name: string) => name.trim().split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase() || '').join('') || '?'
 const avatarMimeTypes = ['image/jpeg', 'image/png', 'image/webp']
 const statusLabel: Record<Status, string> = { RECEBIDA: 'Recebida', EM_ANALISE: 'Em análise', AGUARDANDO_GESTAO: 'Aguardando gestão', APROVADA: 'Aprovada', NEGADA: 'Negada', DEVOLVIDA: 'Devolvida para ajustes' }
@@ -161,6 +348,25 @@ const playNotificationSound = () => {
 }
 
 type RequestChangedEvent = { requestId: number; reason: string; actorId?: number; sellerId?: number; protocol?: string; companyName?: string; status?: Status }
+// Eventos da área de atualização de dados, que não têm ficha de crédito nem limite.
+type DataUpdateChangedEvent = { dataUpdateId: number; reference: string; actorId?: number; sellerId?: number; companyName?: string; status?: DataUpdateStatus }
+
+const describeDataUpdateChangeNotification = (event: DataUpdateChangedEvent, user: AuthUser): string | null => {
+  if (event.actorId != null && event.actorId === user.id) return null
+  const who = event.companyName ? `${event.companyName} (${event.reference})` : event.reference
+  if (user.role === 'VENDEDOR') {
+    if (event.sellerId !== user.id) return null
+    return event.status === 'DESCARTADA'
+      ? `Atualização de dados não efetivada: ${who}.`
+      : `Dados atualizados no Prático: ${who}.`
+  }
+  if (user.role === 'ANALISTA' || user.role === 'GESTORA') {
+    return event.status === 'REGISTRADA'
+      ? `Nova atualização de dados na fila: ${who}.`
+      : `Atualização de dados conferida: ${who}.`
+  }
+  return null
+}
 
 // Decide se um evento em tempo real (vindo do SSE) merece um aviso para o usuário logado —
 // nunca para quem provocou a própria mudança, já que essa pessoa recebe feedback local na hora.
@@ -257,7 +463,7 @@ function App() {
   const [decision, setDecision] = useState<'APROVADA' | 'NEGADA' | null>(null)
   const [showChangePassword, setShowChangePassword] = useState(false)
   const [showEditProfile, setShowEditProfile] = useState(false)
-  const [view, setView] = useState<'main' | 'users' | 'audit' | 'decisions' | 'requests' | 'maintenance'>('main')
+  const [view, setView] = useState<'main' | 'users' | 'audit' | 'decisions' | 'requests' | 'maintenance' | 'data-updates' | 'data-updates-queue'>('main')
   const [editingRequest, setEditingRequest] = useState<Request | null>(null)
   const [profileMenuOpen, setProfileMenuOpen] = useState(false)
   const [notifMenuOpen, setNotifMenuOpen] = useState(false)
@@ -311,6 +517,22 @@ function App() {
     return loaded
   }
   useEffect(() => { if (user) loadRequests().catch(() => pushToast('error', 'API indisponível. O exemplo do dossiê continua disponível.')) }, [user])
+
+  // A contagem de atualizações pendentes alimenta o selo no menu da analista. Fica
+  // declarada aqui porque o listener de eventos (abaixo) também a chama para manter
+  // o número em dia sem esperar a próxima navegação.
+  const [dataUpdateCount, setDataUpdateCount] = useState<number | null>(null)
+  const loadDataUpdateCount = useCallback(async () => {
+    try {
+      const loaded = await listDataUpdate()
+      setDataUpdateCount(loaded.filter((item) => item.status === 'REGISTRADA').length)
+    } catch { setDataUpdateCount(null) }
+  }, [])
+  useEffect(() => {
+    if (!user) { setDataUpdateCount(null); return }
+    loadDataUpdateCount()
+  }, [user?.id, user?.role, loadDataUpdateCount])
+
   useEffect(() => {
     if (!user) return
     let cancelled = false
@@ -332,6 +554,14 @@ function App() {
             if (message) { pushToast('info', message); playNotificationSound() }
           } catch { /* payload inesperado — a lista já foi recarregada de qualquer forma */ }
         })
+        source.addEventListener('client-data-updated', (event) => {
+          try {
+            const payload = JSON.parse((event as MessageEvent).data) as DataUpdateChangedEvent
+            loadDataUpdateCount()
+            const message = describeDataUpdateChangeNotification(payload, user)
+            if (message) { pushToast('info', message); playNotificationSound() }
+          } catch { /* payload inesperado */ }
+        })
         source.onerror = () => {
           source?.close()
           if (!cancelled) retryTimeout = setTimeout(connect, 3000)
@@ -344,6 +574,7 @@ function App() {
     return () => { cancelled = true; source?.close(); if (retryTimeout) clearTimeout(retryTimeout) }
   }, [user])
   const items = requests
+  const pendingDataUpdates = dataUpdateCount ?? 0
   const triageItems = items.filter((item) => item.status === 'RECEBIDA' || item.status === 'EM_ANALISE')
   const decidedItems = items.filter((item) => item.status === 'APROVADA' || item.status === 'NEGADA')
   const pendingDecisions = decidedItems.filter((item) => !item.praticoConfirmedAt)
@@ -516,8 +747,8 @@ function App() {
   if (!user || !role) return <>{pageLoadingBar}<LoginScreen onLogin={(loggedUser) => setUser(loggedUser)} /></>
 
   return <>{pageLoadingBar}<div className="app-shell">
-    <aside className="sidebar"><div className="brand"><img src="/logo_sc.jpg" alt="Sis-Cred" className="brand-logo" /></div><div className="workspace-label">ACESSO ATUAL</div><div className="current-role"><div className="role-icon">{role === 'vendedor' ? <Users size={16} /> : role === 'analista' ? <ClipboardCheck size={16} /> : <ShieldCheck size={16} />}</div><div><strong>{role === 'vendedor' ? 'Vendedor' : role === 'analista' ? 'Analista' : role === 'gestao' ? 'Gestão' : 'Administrador'}</strong><small>Acesso autorizado</small></div></div>{(role === 'admin' || role === 'gestao') && <div className="role-switcher" style={{ marginTop: 18 }}><button className={view === 'main' ? 'nav-item active' : 'nav-item'} onClick={() => setView('main')}>{role === 'admin' ? <Activity size={18} /> : <ShieldCheck size={18} />}<span>{role === 'admin' ? 'Administração' : 'Decisão de crédito'}</span></button><button className={view === 'users' ? 'nav-item active' : 'nav-item'} onClick={() => setView('users')}><Users size={18} /><span>Usuários</span></button><button className={view === 'audit' ? 'nav-item active' : 'nav-item'} onClick={() => setView('audit')}><FileCheck2 size={18} /><span>Auditoria</span></button>{role === 'admin' && <button className={view === 'maintenance' ? 'nav-item active' : 'nav-item'} onClick={() => setView('maintenance')}><Wrench size={18} /><span>Manutenção</span></button>}</div>}{role === 'analista' && <div className="role-switcher" style={{ marginTop: 18 }}><button className={view === 'main' ? 'nav-item active' : 'nav-item'} onClick={() => setView('main')}><ClipboardCheck size={18} /><span>Triagem e dossiê</span></button><button className={view === 'decisions' ? 'nav-item active' : 'nav-item'} onClick={() => setView('decisions')}><FileCheck2 size={18} /><span>Decisões</span>{pendingDecisions.length > 0 && <span className="pending-dot">{pendingDecisions.length}</span>}</button></div>}{role === 'vendedor' && <div className="role-switcher" style={{ marginTop: 18 }}><button className={view === 'main' ? 'nav-item active' : 'nav-item'} onClick={() => { setEditingRequest(null); setView('main') }}><FileText size={18} /><span>Novo cadastro</span></button><button className={view === 'requests' ? 'nav-item active' : 'nav-item'} onClick={() => setView('requests')}><ClipboardCheck size={18} /><span>Minhas solicitações</span></button></div>}<div className="sidebar-bottom"><div className="help-box"><span>Processo digital</span><small>Sem papel no dossiê</small><ArrowUpRight size={16} /></div><button type="button" className="version-tag" onClick={openChangelog}><Sparkles size={12} /> v{CURRENT_VERSION} · novidades</button></div></aside>
-    <main className="main-content">{user.impersonatedBy && <div className="impersonation-banner"><Wrench size={16} /><span><b>Modo de manutenção</b> · você está na conta de <b>{user.name}</b> ({roleLabel[user.role]}). Tudo o que fizer aqui fica registrado na auditoria em nome de {user.impersonatedBy.name}.</span><button type="button" onClick={endImpersonation}><ArrowLeft size={14} /> Voltar para o admin</button></div>}<header className="topbar"><button className="mobile-menu"><Menu size={21} /></button><div className="breadcrumb">Sis-Cred <span>/</span> <b>{view === 'maintenance' ? 'Manutenção' : view === 'audit' ? 'Auditoria' : view === 'users' ? 'Usuários' : view === 'decisions' ? 'Decisões' : view === 'requests' ? 'Minhas solicitações' : role === 'vendedor' ? 'Novo cadastro' : role === 'analista' ? 'Triagem e dossiê' : role === 'gestao' ? 'Decisão de crédito' : 'Administração'}</b></div><div className="top-actions">
+    <aside className="sidebar"><div className="brand"><img src="/logo_sc.jpg" alt="Sis-Cred" className="brand-logo" /></div><div className="workspace-label">ACESSO ATUAL</div><div className="current-role"><div className="role-icon">{role === 'vendedor' ? <Users size={16} /> : role === 'analista' ? <ClipboardCheck size={16} /> : <ShieldCheck size={16} />}</div><div><strong>{role === 'vendedor' ? 'Vendedor' : role === 'analista' ? 'Analista' : role === 'gestao' ? 'Gestão' : 'Administrador'}</strong><small>Acesso autorizado</small></div></div>{(role === 'admin' || role === 'gestao') && <div className="role-switcher" style={{ marginTop: 18 }}><button className={view === 'main' ? 'nav-item active' : 'nav-item'} onClick={() => setView('main')}>{role === 'admin' ? <Activity size={18} /> : <ShieldCheck size={18} />}<span>{role === 'admin' ? 'Administração' : 'Decisão de crédito'}</span></button><button className={view === 'users' ? 'nav-item active' : 'nav-item'} onClick={() => setView('users')}><Users size={18} /><span>Usuários</span></button><button className={view === 'audit' ? 'nav-item active' : 'nav-item'} onClick={() => setView('audit')}><FileCheck2 size={18} /><span>Auditoria</span></button>{role === 'admin' && <button className={view === 'maintenance' ? 'nav-item active' : 'nav-item'} onClick={() => setView('maintenance')}><Wrench size={18} /><span>Manutenção</span></button>}</div>}{role === 'analista' && <div className="role-switcher" style={{ marginTop: 18 }}><button className={view === 'main' ? 'nav-item active' : 'nav-item'} onClick={() => setView('main')}><ClipboardCheck size={18} /><span>Triagem e dossiê</span></button><button className={view === 'decisions' ? 'nav-item active' : 'nav-item'} onClick={() => setView('decisions')}><FileCheck2 size={18} /><span>Decisões</span>{pendingDecisions.length > 0 && <span className="pending-dot">{pendingDecisions.length}</span>}</button><button className={view === 'data-updates-queue' ? 'nav-item active' : 'nav-item'} onClick={() => setView('data-updates-queue')}><UserRound size={18} /><span>Atualizações de dados</span>{pendingDataUpdates > 0 && <span className="pending-dot">{pendingDataUpdates}</span>}</button></div>}{role === 'vendedor' && <div className="role-switcher" style={{ marginTop: 18 }}><button className={view === 'main' ? 'nav-item active' : 'nav-item'} onClick={() => { setEditingRequest(null); setView('main') }}><FileText size={18} /><span>Novo cadastro</span></button><button className={view === 'requests' ? 'nav-item active' : 'nav-item'} onClick={() => setView('requests')}><ClipboardCheck size={18} /><span>Minhas solicitações</span></button><button className={view === 'data-updates' ? 'nav-item active' : 'nav-item'} onClick={() => setView('data-updates')}><UserRound size={18} /><span>Atualização de dados</span></button></div>}<div className="sidebar-bottom"><div className="help-box"><span>Processo digital</span><small>Sem papel no dossiê</small><ArrowUpRight size={16} /></div><button type="button" className="version-tag" onClick={openChangelog}><Sparkles size={12} /> v{CURRENT_VERSION} · novidades</button></div></aside>
+    <main className="main-content">{user.impersonatedBy && <div className="impersonation-banner"><Wrench size={16} /><span><b>Modo de manutenção</b> · você está na conta de <b>{user.name}</b> ({roleLabel[user.role]}). Tudo o que fizer aqui fica registrado na auditoria em nome de {user.impersonatedBy.name}.</span><button type="button" onClick={endImpersonation}><ArrowLeft size={14} /> Voltar para o admin</button></div>}<header className="topbar"><button className="mobile-menu"><Menu size={21} /></button><div className="breadcrumb">Sis-Cred <span>/</span> <b>{view === 'maintenance' ? 'Manutenção' : view === 'audit' ? 'Auditoria' : view === 'users' ? 'Usuários' : view === 'decisions' ? 'Decisões' : view === 'requests' ? 'Minhas solicitações' : view === 'data-updates' ? 'Atualização de dados' : view === 'data-updates-queue' ? 'Atualizações de dados' : role === 'vendedor' ? 'Novo cadastro' : role === 'analista' ? 'Triagem e dossiê' : role === 'gestao' ? 'Decisão de crédito' : 'Administração'}</b></div><div className="top-actions">
         <div className="menu-wrap" ref={notifMenuRef}>
           <button type="button" className="icon-btn" onClick={() => { setNotifMenuOpen((open) => !open); setProfileMenuOpen(false) }}><Bell size={19} />{notifications.length > 0 && <i></i>}</button>
           {notifMenuOpen && <div className="dropdown-panel notif-panel">
@@ -538,7 +769,7 @@ function App() {
           </div>}
         </div>
       </div></header>
-      <div className="content-wrap"><div key={view} className="page-enter">{view === 'maintenance' && role === 'admin' ? <MaintenanceView onOpenUsers={() => setView('users')} /> : view === 'audit' && (role === 'admin' || role === 'gestao') ? <AuditView requests={items} /> : view === 'users' && (role === 'admin' || role === 'gestao') ? <UserManagementView isAdmin={role === 'admin'} currentUserId={user.id} onImpersonate={role === 'admin' && !user.impersonatedBy ? startImpersonation : undefined} /> : view === 'decisions' && role === 'analista' ? <DecisionsView pendingDecisions={pendingDecisions} historyDecisions={historyDecisions} onConfirmPratico={confirmPraticoUpdate} /> : view === 'requests' && role === 'vendedor' ? <SellerRequestsView requests={items} maintenance={!!user.impersonatedBy} onNew={() => { setEditingRequest(null); setView('main') }} onEdit={(item) => { setEditingRequest(item); setView('main') }} /> : <>{role === 'vendedor' && <SellerForm key={editingRequest?.id ?? 'new'} initialRequest={editingRequest} maintenance={!!user.impersonatedBy && !!editingRequest && editingRequest.status !== 'DEVOLVIDA'} onSubmit={editingRequest ? (form, file) => resendRequest(editingRequest.id, form, file) : createRequest} />}{role === 'analista' && <AnalystView requests={triageItems} selected={selected} setSelected={setSelected} onSend={() => updateStatus('AGUARDANDO_GESTAO')} onReturned={handleReturnedToSeller} />}{role === 'gestao' && <ManagementView requests={items.filter((item) => item.status === 'AGUARDANDO_GESTAO')} deniedItems={items.filter((item) => item.status === 'NEGADA')} onReloadRequests={loadRequests} selected={selected} setSelected={setSelected} decision={decision} onDecision={updateStatus} />}{role === 'admin' && <AdminView />}</>}</div></div></main>
+      <div className="content-wrap"><div key={view} className="page-enter">{view === 'data-updates' && role === 'vendedor' ? <SellerDataUpdatesView /> : view === 'data-updates-queue' && (role === 'analista' || role === 'gestao') ? <DataUpdatesQueueView onReload={loadDataUpdateCount} /> : view === 'maintenance' && role === 'admin' ? <MaintenanceView onOpenUsers={() => setView('users')} /> : view === 'audit' && (role === 'admin' || role === 'gestao') ? <AuditView requests={items} /> : view === 'users' && (role === 'admin' || role === 'gestao') ? <UserManagementView isAdmin={role === 'admin'} currentUserId={user.id} onImpersonate={role === 'admin' && !user.impersonatedBy ? startImpersonation : undefined} /> : view === 'decisions' && role === 'analista' ? <DecisionsView pendingDecisions={pendingDecisions} historyDecisions={historyDecisions} onConfirmPratico={confirmPraticoUpdate} /> : view === 'requests' && role === 'vendedor' ? <SellerRequestsView requests={items} maintenance={!!user.impersonatedBy} onNew={() => { setEditingRequest(null); setView('main') }} onEdit={(item) => { setEditingRequest(item); setView('main') }} /> : <>{role === 'vendedor' && <SellerForm key={editingRequest?.id ?? 'new'} initialRequest={editingRequest} maintenance={!!user.impersonatedBy && !!editingRequest && editingRequest.status !== 'DEVOLVIDA'} onSubmit={editingRequest ? (form, file) => resendRequest(editingRequest.id, form, file) : createRequest} />}{role === 'analista' && <AnalystView requests={triageItems} selected={selected} setSelected={setSelected} onSend={() => updateStatus('AGUARDANDO_GESTAO')} onReturned={handleReturnedToSeller} />}{role === 'gestao' && <ManagementView requests={items.filter((item) => item.status === 'AGUARDANDO_GESTAO')} deniedItems={items.filter((item) => item.status === 'NEGADA')} onReloadRequests={loadRequests} selected={selected} setSelected={setSelected} decision={decision} onDecision={updateStatus} />}{role === 'admin' && <AdminView />}</>}</div></div></main>
     {showChangePassword && <ChangePasswordModal onClose={() => setShowChangePassword(false)} onSuccess={() => { setShowChangePassword(false); pushToast('success', 'Senha atualizada com sucesso.') }} />}
     {showEditProfile && <EditProfileModal user={user} avatarSrc={avatarSrc} onClose={() => setShowEditProfile(false)} onSaved={saveProfilePatch} />}
     {burst && <ConfirmationBurst ok={burst.ok} title={burst.title} message={burst.message} onDone={() => setBurst(null)} />}
@@ -874,7 +1105,7 @@ function AdminView() { const [overview, setOverview] = useState<{ users: { total
 const statusOrder: Status[] = ['RECEBIDA', 'EM_ANALISE', 'AGUARDANDO_GESTAO', 'APROVADA', 'NEGADA', 'DEVOLVIDA']
 const documentLabel: Record<string, string> = { CONTRATO_SOCIAL: 'Contrato social / Certificado MEI', SERASA: 'Consulta Serasa', DEPS: 'Avaliação DEPS' }
 
-type AuditEvent = { id: number; requestId: number; eventType: string; eventData: Record<string, unknown> | null; createdAt: string; actorName: string; actorRole: BackendRole; protocol: string; companyName: string; clientCode: string }
+type AuditEvent = { id: number; requestId: number | null; dataUpdateId: number | null; eventType: string; eventData: Record<string, unknown> | null; createdAt: string; actorName: string; actorRole: BackendRole; protocol: string | null; companyName: string | null; clientCode: string | null; dataUpdateReference: string | null; dataUpdateCompanyName: string | null; dataUpdateClientCode: string | null }
 const auditEventLabel: Record<string, string> = {
   SOLICITACAO_CRIADA: 'Solicitação criada',
   DOCUMENTO_ENVIADO: 'Documento enviado',
@@ -886,6 +1117,9 @@ const auditEventLabel: Record<string, string> = {
   SOLICITACAO_DEVOLVIDA: 'Cadastro devolvido ao vendedor',
   SOLICITACAO_REENVIADA: 'Cadastro reenviado pelo vendedor',
   CORRECAO_MANUTENCAO: 'Correção em modo de manutenção',
+  ATUALIZACAO_DADOS_REGISTRADA: 'Atualização de dados registrada',
+  ATUALIZACAO_DADOS_CONFIRMADA: 'Atualização de dados confirmada no Prático',
+  ATUALIZACAO_DADOS_DESCARTADA: 'Atualização de dados descartada',
 }
 // Ações feitas por um administrador dentro da conta de outro usuário ganham a marca de manutenção.
 const auditEventDetail = (event: AuditEvent): string => {
@@ -907,20 +1141,37 @@ const baseAuditEventDetail = (event: AuditEvent): string => {
     case 'SOLICITACAO_DEVOLVIDA': return `Motivo: "${data.reason}"`
     case 'SOLICITACAO_REENVIADA': return 'Cadastro corrigido e reenviado para triagem'
     case 'CORRECAO_MANUTENCAO': return 'Dados da ficha corrigidos pelo administrador'
+    case 'ATUALIZACAO_DADOS_REGISTRADA': {
+      const fields = Array.isArray(data.changedFields) ? (data.changedFields as string[]) : []
+      return `Campos: ${fields.length ? fields.join(', ') : 'dados de contato'}`
+    }
+    case 'ATUALIZACAO_DADOS_CONFIRMADA': return 'Alteração aplicada no cadastro do Prático pela analista'
+    case 'ATUALIZACAO_DADOS_DESCARTADA': return `Não efetivada · motivo: "${data.reason ?? 'não informado'}"`
     default: return '—'
   }
 }
 const csvCell = (value: string) => `"${value.replace(/"/g, '""')}"`
-type AuditGroup = { requestId: number; protocol: string; companyName: string; clientCode: string; events: AuditEvent[] }
+type AuditGroup = { key: string; label: string; reference: string; clientCode: string; isDataUpdate: boolean; events: AuditEvent[] }
 const groupAuditEvents = (events: AuditEvent[]): AuditGroup[] => {
   const groups: AuditGroup[] = []
-  const indexByRequest = new Map<number, number>()
+  const indexByKey = new Map<string, number>()
   for (const event of events) {
-    let index = indexByRequest.get(event.requestId)
+    // Solicitação de crédito e atualização de dados são trilhas diferentes: a chave é o id
+    // do registro, prefixado para não colidir quando um cliente tem os dois tipos de evento.
+    const key = event.requestId != null ? `cr-${event.requestId}` : `at-${event.dataUpdateId}`
+    const isDataUpdate = event.requestId == null
+    let index = indexByKey.get(key)
     if (index === undefined) {
       index = groups.length
-      indexByRequest.set(event.requestId, index)
-      groups.push({ requestId: event.requestId, protocol: event.protocol, companyName: event.companyName, clientCode: event.clientCode, events: [] })
+      indexByKey.set(key, index)
+      groups.push({
+        key,
+        label: event.companyName || event.dataUpdateCompanyName || 'Registro',
+        reference: event.protocol || event.dataUpdateReference || '—',
+        clientCode: event.clientCode || event.dataUpdateClientCode || '—',
+        isDataUpdate,
+        events: [],
+      })
     }
     groups[index].events.push(event)
   }
@@ -939,7 +1190,7 @@ function AuditView({ requests }: { requests: Request[] }) {
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
   const [searchTerm, setSearchTerm] = useState('')
-  const [expandedRequestIds, setExpandedRequestIds] = useState<Set<number>>(new Set())
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
 
   const openDetail = async (item: Request) => {
     setDetail(item); setDetailLoading(true); setDetailDecision(null); setDetailDocuments([])
@@ -985,14 +1236,14 @@ function AuditView({ requests }: { requests: Request[] }) {
     URL.revokeObjectURL(url)
   }
 
-  const toggleGroup = (requestId: number) => setExpandedRequestIds((current) => {
+  const toggleGroup = (key: string) => setExpandedGroups((current) => {
     const next = new Set(current)
-    if (next.has(requestId)) next.delete(requestId); else next.add(requestId)
+    if (next.has(key)) next.delete(key); else next.add(key)
     return next
   })
   const auditGroups = groupAuditEvents(events)
-  const allGroupsExpanded = auditGroups.length > 0 && auditGroups.every((group) => expandedRequestIds.has(group.requestId))
-  const toggleAllGroups = () => setExpandedRequestIds(allGroupsExpanded ? new Set() : new Set(auditGroups.map((group) => group.requestId)))
+  const allGroupsExpanded = auditGroups.length > 0 && auditGroups.every((group) => expandedGroups.has(group.key))
+  const toggleAllGroups = () => setExpandedGroups(allGroupsExpanded ? new Set() : new Set(auditGroups.map((group) => group.key)))
 
   const counts: Record<Status, number> = { RECEBIDA: 0, EM_ANALISE: 0, AGUARDANDO_GESTAO: 0, APROVADA: 0, NEGADA: 0, DEVOLVIDA: 0 }
   for (const item of requests) counts[item.status]++
@@ -1040,12 +1291,12 @@ function AuditView({ requests }: { requests: Request[] }) {
       </div>
       {eventsLoading ? <p className="subheading" style={{ padding: '17px' }}>Carregando...</p> : auditGroups.length ? <div className="audit-groups">
         {auditGroups.map((group) => {
-          const isOpen = expandedRequestIds.has(group.requestId)
+          const isOpen = expandedGroups.has(group.key)
           const chronological = [...group.events].reverse()
-          return <div className="audit-group" key={group.requestId}>
-            <button type="button" className="audit-group-header" onClick={() => toggleGroup(group.requestId)}>
-              <div className="case-avatar blue">{group.companyName.slice(0, 2)}</div>
-              <div><strong>{group.companyName}</strong><small>{group.protocol} · Código {group.clientCode}</small></div>
+          return <div className="audit-group" key={group.key}>
+            <button type="button" className="audit-group-header" onClick={() => toggleGroup(group.key)}>
+              <div className="case-avatar blue">{group.label.slice(0, 2)}</div>
+              <div><strong>{group.label}{group.isDataUpdate && <span className="tag" style={{ marginLeft: 8, fontSize: 10 }}>dados</span>}</strong><small>{group.reference} · Código {group.clientCode}</small></div>
               <div className="audit-group-meta">
                 <span className="audit-group-count">{group.events.length} evento{group.events.length > 1 ? 's' : ''}</span>
                 <span className="time">{formatDateTime(group.events[0].createdAt)}</span>
@@ -1242,6 +1493,391 @@ const sellerProcessSteps = [
   { key: 'DECISAO', label: 'Decisão' },
 ]
 const sellerStepIndex: Record<Status, number> = { RECEBIDA: 0, EM_ANALISE: 1, AGUARDANDO_GESTAO: 2, APROVADA: 3, NEGADA: 3, DEVOLVIDA: 0 }
+
+// Formulário único da área de atualização de dados: busca o cadastro no Prático
+// (somente leitura), mostra o que já está lá e o vendedor corrige o que precisa.
+function ClientDataUpdateForm({ onSubmit, initialCode, initialName }: { onSubmit: (payload: Record<string, string>) => Promise<string | null>; initialCode: string; initialName: string }) {
+  const [lookupMode, setLookupMode] = useState<'code' | 'document'>('code')
+  const [lookupValue, setLookupValue] = useState('')
+  const [lookupResults, setLookupResults] = useState<PraticoClient[]>([])
+  const [lookupLoading, setLookupLoading] = useState(false)
+  const [lookupError, setLookupError] = useState('')
+  const [loadedFrom, setLoadedFrom] = useState<PraticoCurrentContact | null>(null)
+  const [submitting, setSubmitting] = useState(false)
+  const [submitError, setSubmitError] = useState('')
+  const formRef = useRef<HTMLFormElement>(null)
+
+  const field = (name: string) => formRef.current?.querySelector<HTMLInputElement>(`[name="${name}"]`)
+  const setField = (name: string, value: string | null) => { const input = field(name); if (input) input.value = value ?? '' }
+  const readField = (name: string) => field(name)?.value.trim() ?? ''
+
+  // O Prático guarda vários e-mails numa linha só, separados por ';' ou ',' (ex.:
+  // "suprimentos@spillere.com.br;auxiliaradm@spillere.com.br"). A ficha cadastral já
+  // sabe quebrar isso em campos separados; aqui fazemos o mesmo, distribuindo pelos
+  // e-mails de NFe, financeiro e principal — sem nenhum deles restante colado com ';'.
+  const applyPraticoClient = (client: PraticoClient) => {
+    setField('clientCode', client.clientCode)
+    setField('companyName', client.companyName)
+    setField('cnpj', client.document ?? '')
+    const emails = splitEmails(client.email)
+    // O campo "contato" do Prático às vezes vem com um e-mail em vez de um nome
+    // (ex.: tesouraria@...) — nesse caso é o e-mail da tesouraria, não o nome do contato.
+    const contactRaw = client.contactName?.trim() ?? ''
+    const contactIsEmail = emailPattern.test(contactRaw)
+    if (!contactIsEmail) setField('contactName', client.contactName)
+    setField('email', emails[0] ?? '')
+    setField('invoiceEmail', emails[1] ?? '')
+    setField('financeEmail', emails[2] ?? (contactIsEmail ? contactRaw : null))
+    setField('phone', client.phones[0] ?? '')
+    setField('phoneMobile', client.phones[1] ?? '')
+    const parsed = parsePraticoAddress(client.address)
+    setField('street', parsed.street || null)
+    setField('streetNumber', parsed.streetNumber || null)
+    setField('streetComplement', parsed.streetComplement || null)
+    setField('district', parsed.district || null)
+    setField('city', parsed.city || null)
+    setField('state', parsed.state || null)
+    setField('zipCode', parsed.zipCode || null)
+    setLookupResults([])
+    setLookupError('')
+    setLoadedFrom({
+      contactName: contactIsEmail ? contactRaw : client.contactName,
+      phones: client.phones, email: [...emails, ...(contactIsEmail ? [contactRaw] : [])].join(', ') || client.email,
+      street: parsed.street, district: parsed.district, city: parsed.city, state: parsed.state, zipCode: parsed.zipCode,
+    })
+  }
+
+  const searchPratico = async () => {
+    if (lookupLoading) return
+    const value = lookupValue.trim()
+    if (lookupMode === 'code' && !/^\d{1,9}$/.test(value)) { setLookupError('Informe o código do cliente no Prático (somente números).'); return }
+    if (lookupMode === 'document') {
+      const length = value.replace(/[^A-Z0-9]/gi, '').length
+      if (length !== 11 && length !== 14) { setLookupError('Informe um CPF (11 dígitos) ou CNPJ (14 caracteres) válido.'); return }
+    }
+    setLookupLoading(true); setLookupError(''); setLookupResults([])
+    try {
+      const response = await apiFetch(`/api/pratico/clients?by=${lookupMode}&value=${encodeURIComponent(value)}`)
+      const data = await response.json().catch(() => null)
+      if (!response.ok) { setLookupError(data?.message || `Não foi possível consultar o Prático (HTTP ${response.status}).`); return }
+      const clients = data as PraticoClient[]
+      if (!clients.length) { setLookupError(lookupMode === 'code' ? 'Nenhum cliente encontrado no Prático com esse código.' : 'Nenhum cliente encontrado no Prático com esse CPF/CNPJ.'); return }
+      if (clients.length === 1) applyPraticoClient(clients[0])
+      else setLookupResults(clients)
+    } catch { setLookupError('Não foi possível consultar o Prático. Tente novamente ou preencha manualmente.') }
+    finally { setLookupLoading(false) }
+  }
+
+  const resetForm = () => {
+    formRef.current?.reset()
+    setLookupValue(''); setLookupResults([]); setLookupError(''); setLoadedFrom(null); setSubmitError('')
+    setField('clientCode', initialCode); setField('companyName', initialName)
+  }
+
+  const submit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (submitting) return
+    const form = event.currentTarget
+    if (!form.reportValidity()) return
+    setSubmitting(true); setSubmitError('')
+    const payload: Record<string, string> = {}
+    for (const key of ['clientCode', 'companyName', 'cnpj', 'contactName', 'phone', 'phoneMobile', 'email', 'invoiceEmail', 'financeEmail', 'street', 'streetNumber', 'streetComplement', 'district', 'city', 'state', 'zipCode', 'notes']) {
+      payload[key] = readField(key)
+    }
+    const error = await onSubmit(payload)
+    if (error) setSubmitError(error)
+    else resetForm()
+    setSubmitting(false)
+  }
+
+  return <form className="form-page" ref={formRef} onSubmit={submit}>
+
+
+    <div className="form-section">
+      <div className="form-section-head"><div className="form-section-icon"><Search size={16} /></div><div><h3>Localizar o cliente</h3><p>Busca somente leitura no sistema Prático</p></div></div>
+      <div className="form-grid">
+        <label>Buscar cadastro no Prático por<select value={lookupMode} onChange={(event) => { setLookupMode(event.target.value as 'code' | 'document'); setLookupValue(''); setLookupError(''); setLookupResults([]) }}><option value="code">Código do cliente</option><option value="document">CNPJ ou CPF</option></select></label>
+        <label>{lookupMode === 'code' ? 'Código do cliente no Prático' : 'CNPJ ou CPF do cliente'}<input placeholder={lookupMode === 'code' ? 'Ex.: 258912' : '00.000.000/0000-00'} inputMode={lookupMode === 'code' ? 'numeric' : undefined} maxLength={lookupMode === 'code' ? 9 : 18} value={lookupValue} onChange={(event) => setLookupValue(lookupMode === 'code' ? event.target.value.replace(/\D/g, '') : formatDocument(event.target.value))} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); searchPratico() } }} /></label>
+      </div>
+      <button type="button" className="outline-btn" style={{ marginTop: 0, marginBottom: 13 }} onClick={searchPratico} disabled={lookupLoading}><Search size={15} /> {lookupLoading ? 'Consultando o Prático...' : 'Buscar no Prático e preencher'}</button>
+      {lookupError && <div className="notice notice-error"><X size={17} /> {lookupError}</div>}
+      {loadedFrom && <div className="notice" style={{ margin: '0 0 15px' }}><Check size={17} /> Dados atuais carregados do Prático. Confira e corrija só o que estiver errado.</div>}
+      {lookupResults.length > 0 && <div style={{ marginBottom: 15 }}>
+        <p className="field-label" style={{ marginBottom: 6 }}>Mais de um cadastro encontrado — selecione o cliente:</p>
+        {lookupResults.map((client) => <button type="button" className="queue-item" style={{ width: '100%' }} key={`${client.companyCode}-${client.clientCode}`} onClick={() => applyPraticoClient(client)}>
+          <div className="case-avatar blue">{(client.companyName ?? '?').slice(0, 2)}</div>
+          <div><strong>{client.companyName ?? '—'}</strong><small>Código {client.clientCode}{client.companyCode != null ? ` · Empresa ${client.companyCode}` : ''} · {client.document ?? 'sem documento'}</small></div>
+        </button>)}
+      </div>}
+      <div className="form-grid">
+        <label>Código do cadastro (Prático)<span className="required-mark">*</span><input name="clientCode" required placeholder="Ex.: 258912" defaultValue={initialCode} /></label>
+        <label>CNPJ ou CPF<input name="cnpj" placeholder="00.000.000/0000-00" maxLength={18} /></label>
+      </div>
+      <label>Nome do cliente<span className="required-mark">*</span><input name="companyName" required placeholder="Razão social do cliente" defaultValue={initialName} /></label>
+    </div>
+
+    <div className="form-section">
+      <div className="form-section-head"><div className="form-section-icon"><Mail size={16} /></div><div><h3>E-mails e telefones</h3><p>Informe ao menos um e-mail para atualizar</p></div></div>
+      <div className="form-grid">
+        <label>E-mail principal<input name="email" type="email" placeholder="financeiro@cliente.com.br" /></label>
+        <label>E-mail para NFe<input name="invoiceEmail" type="email" placeholder="nfe@cliente.com.br" /></label>
+      </div>
+      <div className="form-grid">
+        <label>E-mail financeiro<input name="financeEmail" type="email" placeholder="contas@cliente.com.br" /></label>
+        <label>Nome do contato<input name="contactName" placeholder="Responsável pelo financeiro" /></label>
+      </div>
+      <div className="form-grid">
+        <label>Telefone<input name="phone" placeholder="(00) 0000-0000" /></label>
+        <label>Celular / WhatsApp<input name="phoneMobile" placeholder="(00) 00000-0000" /></label>
+      </div>
+    </div>
+
+    <div className="form-section">
+      <div className="form-section-head"><div className="form-section-icon"><MapPin size={16} /></div><div><h3>Endereço completo</h3><p>Preencha só se o endereço estiver errado ou faltando</p></div></div>
+      <div className="form-grid" style={{ gridTemplateColumns: '2fr 1fr' }}>
+        <label>Logradouro<input name="street" placeholder="Rua, avenida..." /></label>
+        <label>Número<input name="streetNumber" placeholder="123" /></label>
+      </div>
+      <div className="form-grid">
+        <label>Complemento<input name="streetComplement" placeholder="Sala, loja, bloco (opcional)" /></label>
+        <label>Bairro<input name="district" placeholder="Bairro" /></label>
+      </div>
+      <div className="form-grid" style={{ gridTemplateColumns: '2fr 1fr' }}>
+        <label>Cidade<input name="city" placeholder="Cidade" /></label>
+        <label>UF<input name="state" placeholder="SP" maxLength={2} onChange={(event) => setField('state', formatState(event.target.value))} /></label>
+      </div>
+      <label>CEP<input name="zipCode" placeholder="00000-000" maxLength={9} onChange={(event) => setField('zipCode', formatZipCode(event.target.value))} /></label>
+    </div>
+
+    <div className="form-section">
+      <div className="form-section-head"><div className="form-section-icon"><MessageSquareText size={16} /></div><div><h3>Observações</h3><p>Ajuda a analista a conferir mais rápido</p></div></div>
+      <label>Por que esses dados precisam ser atualizados?<textarea name="notes" rows={3} placeholder="Ex.: o cliente mudou o e-mail do financeiro e passou a emitir NFe no endereço novo..."></textarea></label>
+    </div>
+
+    {submitError && <div className="notice notice-error"><X size={17} /> {submitError}</div>}
+    <div className="form-page-actions"><button type="button" className="cancel-btn" onClick={resetForm}>Limpar formulário</button><button type="submit" className="primary-btn" disabled={submitting}><Send size={17} /> {submitting ? 'Registrando...' : 'Registrar atualização'}</button></div>
+  </form>
+}
+
+function ClientDataUpdateDetailModal({ item, onClose }: { item: ClientDataUpdate; onClose: () => void }) {
+  // O vendedor não tem acesso de leitura ao Prático (isso é da analista), então aqui
+  // mostramos o que ele pediu, agrupado, com os campos vazios destacados para ficar
+  // claro o que foi enviado. Se a atualização foi conferida, mostramos o desfecho.
+  const grupos = dataUpdateGroupOrder
+    .map((group) => ({ group, rows: dataUpdateFieldsOf(item, null).filter((row) => row.group === group && row.pedido) }))
+    .filter((entry) => entry.rows.length > 0)
+
+  return <div className="modal-backdrop"><div className="modal" style={{ maxWidth: 560, maxHeight: 'calc(100vh - 40px)', overflowY: 'auto' }}>
+    <div className="modal-head"><div><p className="eyebrow">ATUALIZAÇÃO {item.reference}</p><h2>{item.companyName}</h2></div><button type="button" onClick={onClose}><X size={19} /></button></div>
+    <div className="data-grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
+      <div><span>Situação</span><strong className={item.status === 'CONFIRMADA' ? 'success-text' : item.status === 'DESCARTADA' ? 'danger-text' : ''}>{dataUpdateStatusLabel[item.status]}</strong></div>
+      <div><span>Código do cadastro</span><strong>{item.clientCode}</strong></div>
+      <div><span>Registrada em</span><strong>{formatDateTime(item.registeredAt)}</strong></div>
+      <div><span>Vendedor</span><strong>{item.sellerName}</strong></div>
+    </div>
+    {item.status === 'REGISTRADA' && <div className="notice" style={{ margin: '14px 0' }}><Info size={17} /> A analista ainda vai conferir e fazer a alteração no sistema Prático.</div>}
+    {item.notes && <><div className="form-section-title">Suas observações</div><p className="modal-copy">{item.notes}</p></>}
+    <div className="form-section-title">O que você pediu para atualizar</div>
+    {grupos.map(({ group, rows }) => <div key={group} style={{ marginBottom: 12 }}>
+      <div className="data-update-subtitle">{group}</div>
+      <div className="data-update-diff">
+        {rows.map((row) => <div className="data-update-row" key={row.key}>
+          <span className="data-update-label">{row.label}</span>
+          <div className="data-update-values single"><div><span className="new">{row.pedido}</span></div></div>
+        </div>)}
+      </div>
+    </div>)}
+    {item.status === 'CONFIRMADA' && <><div className="form-section-title">Conferência</div><div className="check-line"><ShieldCheck size={16} /><div><strong>{item.reviewerName || 'Analista'}</strong><small>Dados alterados no Prático{item.reviewedAt ? ` em ${formatDateTime(item.reviewedAt)}` : ''}</small></div></div>{item.reviewNotes && <p className="modal-copy">{item.reviewNotes}</p>}</>}
+    {item.status === 'DESCARTADA' && <><div className="notice notice-error" style={{ margin: '14px 0' }}><X size={17} /> {item.rejectionReason || 'A atualização não foi efetivada.'}</div>{item.reviewedAt && <p className="modal-copy">Conferido em {formatDateTime(item.reviewedAt)}{item.reviewerName ? ` por ${item.reviewerName}` : ''}. Você pode corrigir e enviar de novo.</p>}</>}
+    <div className="modal-actions"><button type="button" className="cancel-btn" onClick={onClose}>Fechar</button></div>
+  </div></div>
+}
+
+function ClientDataUpdateListModal({ item, onClose, onReviewed }: { item: ClientDataUpdate; onClose: () => void; onReviewed: () => void }) {
+  // Registro já conferido (confirmado ou descartado) não pode voltar para a fila:
+  // nesse caso o modal é só de leitura, sem os botões de confirmar/descartar.
+  const jaConferido = item.status !== 'REGISTRADA'
+  const [reviewNotes, setReviewNotes] = useState('')
+  const [rejectionReason, setRejectionReason] = useState('')
+  const [confirmingDiscard, setConfirmingDiscard] = useState(false)
+  const [saving, setSaving] = useState<'CONFIRMADA' | 'DESCARTADA' | null>(null)
+  const [error, setError] = useState('')
+  const [current, setCurrent] = useState<PraticoCurrentContact | null>(null)
+  const [loadingCurrent, setLoadingCurrent] = useState(false)
+  const [currentError, setCurrentError] = useState('')
+  const pushToast = useToast()
+
+  const loadCurrent = async () => {
+    setLoadingCurrent(true); setCurrentError(''); setCurrent(null)
+    try {
+      const response = await apiFetch(`/api/client-data-updates/${item.id}/pratico`)
+      const data = await response.json().catch(() => null)
+      if (!response.ok) { setCurrentError(data?.message || 'Não foi possível consultar o Prático.'); return }
+      setCurrent(data.current as PraticoCurrentContact)
+    } catch { setCurrentError('Não foi possível consultar o Prático.') } finally { setLoadingCurrent(false) }
+  }
+  // Só busca o cadastro atual do Prático enquanto o registro está na fila — depois de
+  // conferido a comparação não muda nada e a consulta só custaria espera.
+  useEffect(() => { if (!jaConferido) loadCurrent() }, [item.id, jaConferido])
+
+  const fields = dataUpdateFieldsOf(item, current)
+  const changed = fields.filter((row) => row.difere)
+  const unchanged = fields.filter((row) => !row.difere && row.pedido)
+
+  const submitReview = async (nextStatus: 'CONFIRMADA' | 'DESCARTADA') => {
+    if (saving) return
+    if (nextStatus === 'DESCARTADA' && !rejectionReason.trim()) { setError('Informe o motivo para o vendedor.'); setConfirmingDiscard(true); return }
+    setSaving(nextStatus); setError('')
+    const response = await apiFetch(`/api/client-data-updates/${item.id}/review`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: nextStatus, reviewNotes: reviewNotes.trim() || null, rejectionReason: rejectionReason.trim() || null }),
+    })
+    const body = await response.json().catch(() => null)
+    if (!response.ok) { setError(body?.message || 'Não foi possível registrar a conferência.'); setSaving(null); return }
+    pushToast('success', nextStatus === 'CONFIRMADA' ? 'Atualização confirmada no Prático. O vendedor foi avisado por e-mail.' : 'Atualização descartada. O vendedor foi avisado por e-mail.')
+    onReviewed(); onClose()
+  }
+
+  return <div className="modal-backdrop"><div className="modal" style={{ maxWidth: 640, maxHeight: 'calc(100vh - 40px)', overflowY: 'auto' }}>
+    <div className="modal-head"><div><p className="eyebrow">ATUALIZAÇÃO {item.reference}</p><h2>{item.companyName}</h2></div><button type="button" onClick={onClose}><X size={19} /></button></div>
+    <p className="modal-copy">Código do cadastro no Prático: <b>{item.clientCode}</b> · Vendedor: {item.sellerName} · Registrada em {formatDateTime(item.registeredAt)}</p>
+    {jaConferido && <div className={item.status === 'CONFIRMADA' ? 'notice' : 'notice notice-error'} style={{ margin: '0 0 16px' }}>
+      {item.status === 'CONFIRMADA' ? <CheckCircle2 size={17} /> : <XCircle size={17} />}
+      <div><b>{dataUpdateStatusLabel[item.status]}</b> · {item.reviewedAt ? formatDateTime(item.reviewedAt) : '—'}{item.reviewerName ? ` por ${item.reviewerName}` : ''}
+        {item.status === 'DESCARTADA' && item.rejectionReason ? ` — ${item.rejectionReason}` : ''}</div>
+    </div>}
+    <div className="form-section-title">O que precisa ser alterado no Prático</div>
+    {jaConferido ? <p className="modal-copy">Comparação feita no momento da conferência. O que foi alterado no Prático está registrado abaixo.</p> : loadingCurrent ? <p className="modal-copy">Consultando o Prático para comparar...</p> : currentError
+      ? <div className="notice notice-error" style={{ marginBottom: 12 }}><X size={17} /> {currentError} <button type="button" className="link-btn" style={{ marginLeft: 6 }} onClick={loadCurrent}>Tentar de novo</button></div>
+      : <>
+        <p className="modal-copy" style={{ marginBottom: 10 }}>
+          {changed.length === 0
+            ? 'Nenhuma diferença em relação ao que já está no Prático — confira se o cadastro realmente precisa de alteração.'
+            : <><b style={{ color: '#c0392b' }}>{changed.length} campo(s) com valor diferente do que está no Prático</b> (em vermelho). Altere esses no sistema Prático antes de confirmar.</>}
+        </p>
+        <div className="data-update-diff">
+          {changed.map((row) => <div className="data-update-row changed" key={row.key}>
+            <span className="data-update-label">{row.label}</span>
+            <div className="data-update-values">
+              <div><small>ATUAL NO PRÁTICO</small><span className="old">{row.atual || '—'}</span></div>
+              <span className="data-update-arrow">→</span>
+              <div><small>ALTERAR PARA</small><span className="new">{row.pedido}</span></div>
+            </div>
+          </div>)}
+          {unchanged.length > 0 && <>
+            <div className="data-update-subtitle">Iguais ao que já está no Prático</div>
+            {unchanged.map((row) => <div className="data-update-row" key={row.key}>
+              <span className="data-update-label">{row.label}</span>
+              <div className="data-update-values single"><div><span className="same">{row.pedido}</span></div></div>
+            </div>)}
+          </>}
+        </div>
+      </>}
+
+    {item.notes && <><div className="form-section-title">Observações do vendedor</div><p className="modal-copy">{item.notes}</p></>}
+
+    <div className="form-section-title">Conferência</div>
+    {jaConferido
+      ? (item.reviewNotes
+        ? <div><p className="field-label" style={{ marginBottom: 4 }}>Observações da analista</p><p className="modal-copy">{item.reviewNotes}</p></div>
+        : <p className="modal-copy">Nenhuma observação registrada na conferência.</p>)
+      : <>
+        <label>Observações da analista<textarea value={reviewNotes} onChange={(event) => setReviewNotes(event.target.value)} rows={2} placeholder="Opcional — aparece para o vendedor no e-mail e na tela"></textarea></label>
+        <label style={{ marginTop: 10 }}>Motivo do descarte (só se for descartar)<input value={rejectionReason} onChange={(event) => setRejectionReason(event.target.value)} placeholder="Ex.: o e-mail informado não existe mais; confirme o endereço correto" /></label>
+      </>}
+    {error && <div className="notice notice-error" style={{ marginTop: 12 }}><X size={17} /> {error}</div>}
+    <div className="modal-actions">
+      <button type="button" className="cancel-btn" onClick={onClose}>Fechar</button>
+      {!jaConferido && (confirmingDiscard
+        ? <>
+          <button type="button" className="cancel-btn" onClick={() => setConfirmingDiscard(false)}>Cancelar</button>
+          <button type="button" className="outline-btn danger" onClick={() => submitReview('DESCARTADA')} disabled={saving !== null}>{saving === 'DESCARTADA' ? 'Descartando...' : 'Confirmar descarte'}</button>
+        </>
+        : <>
+          <button type="button" className="outline-btn" onClick={() => { setConfirmingDiscard(true); setError('') }} disabled={saving !== null}><X size={16} /> Descartar</button>
+          <button type="button" className="primary-btn" onClick={() => submitReview('CONFIRMADA')} disabled={saving !== null}>{saving === 'CONFIRMADA' ? 'Confirmando...' : <><Check size={16} /> Confirmar no Prático</>}</button>
+        </>)}
+    </div>
+  </div></div>
+}
+
+function SellerDataUpdatesView() {
+  const [items, setItems] = useState<ClientDataUpdate[]>([])
+  const [loading, setLoading] = useState(true)
+  const [detail, setDetail] = useState<ClientDataUpdate | null>(null)
+  const [tab, setTab] = useState<'form' | 'list'>('form')
+  const pushToast = useToast()
+
+  const load = async () => {
+    setLoading(true)
+    try { setItems(await listDataUpdate()) } catch { pushToast('error', 'Não foi possível carregar suas atualizações de dados.') } finally { setLoading(false) }
+  }
+  useEffect(() => { load() }, [])
+
+  const submitUpdate = async (payload: Record<string, string>) => {
+    const response = await apiFetch('/api/client-data-updates', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
+    const body = await response.json().catch(() => null)
+    if (!response.ok) return body?.message || 'Confira os campos e tente novamente.'
+    await load()
+    setTab('list')
+    pushToast('success', `Atualização ${body.reference} registrada. A analista vai conferir e alterar no Prático.`)
+    return null
+  }
+
+  const pending = items.filter((item) => item.status === 'REGISTRADA')
+  const done = items.filter((item) => item.status !== 'REGISTRADA')
+
+  return <>
+    <PageHeader eyebrow="ÁREA DO VENDEDOR" title="Atualização de dados" subtitle="Corrija e-mail, telefone, contato e endereço do cliente sem abrir solicitação de crédito. A analista confirma a alteração no Prático." />
+    <div className="subtabs">
+      <button type="button" className={tab === 'form' ? 'subtab active' : 'subtab'} onClick={() => setTab('form')}><Plus size={15} /> Nova atualização</button>
+      <button type="button" className={tab === 'list' ? 'subtab active' : 'subtab'} onClick={() => { setTab('list'); load() }}>Minhas atualizações{pending.length > 0 && <span className="subtab-count">{pending.length}</span>}</button>
+    </div>
+    {tab === 'form'
+      ? <ClientDataUpdateForm onSubmit={submitUpdate} initialCode={detail?.clientCode ?? ''} initialName={detail?.companyName ?? ''} />
+      : loading ? <p className="subheading">Carregando...</p> : <>
+        <div className="section-title"><div><h2>Aguardando conferência</h2><p>{pending.length} atualização(ões) na fila da analista</p></div></div>
+        {pending.length ? <section className="admin-card"><div className="user-table"><div className="user-head" style={{ gridTemplateColumns: '1.4fr .7fr .9fr .9fr 110px' }}><span>CLIENTE</span><span>REGISTRO</span><span>CAMPOS</span><span>ENVIADA EM</span><span></span></div>
+          {pending.map((item) => <div className="user-row" key={item.id} style={{ gridTemplateColumns: '1.4fr .7fr .9fr .9fr 110px' }}><div><strong>{item.companyName}</strong><small>Código Prático: {item.clientCode}</small></div><span className="user-role">{item.reference}</span><span className="user-role">{dataUpdateChangeCount(dataUpdateFieldsOf(item, null))} campo(s) para alterar</span><span className="time">{formatDateTime(item.registeredAt)}</span><button className="small-action" onClick={() => setDetail(item)}>Ver</button></div>)}
+        </div></section> : <p className="subheading" style={{ padding: '20px' }}>Nenhuma atualização aguardando conferência.</p>}
+        <div className="section-title" style={{ marginTop: 26 }}><div><h2>Já conferidas</h2><p>{done.length} atualização(ões) com situação definida</p></div></div>
+        {done.length ? <section className="admin-card"><div className="user-table"><div className="user-head" style={{ gridTemplateColumns: '1.4fr .7fr .9fr .9fr 110px' }}><span>CLIENTE</span><span>REGISTRO</span><span>SITUAÇÃO</span><span>CONFERIDA EM</span><span></span></div>
+          {done.map((item) => <div className="user-row" key={item.id} style={{ gridTemplateColumns: '1.4fr .7fr .9fr .9fr 110px' }}><div><strong>{item.companyName}</strong><small>Código Prático: {item.clientCode}</small></div><span className="user-role">{item.reference}</span><span className={item.status === 'CONFIRMADA' ? 'access-active' : 'access-inactive'}><i></i>{dataUpdateStatusLabel[item.status]}</span><span className="time">{item.reviewedAt ? formatDateTime(item.reviewedAt) : '—'}</span><button className="small-action" onClick={() => setDetail(item)}>Ver</button></div>)}
+        </div></section> : <p className="subheading" style={{ padding: '20px' }}>Nenhuma atualização conferida ainda.</p>}
+      </>}
+    {detail && <ClientDataUpdateDetailModal item={detail} onClose={() => setDetail(null)} />}
+  </>
+}
+
+function DataUpdatesQueueView({ onReload }: { onReload: () => void }) {
+  const [items, setItems] = useState<ClientDataUpdate[]>([])
+  const [loading, setLoading] = useState(true)
+  const [review, setReview] = useState<ClientDataUpdate | null>(null)
+  const pushToast = useToast()
+
+  const load = async () => {
+    setLoading(true)
+    try { setItems(await listDataUpdate()) } catch { pushToast('error', 'Não foi possível carregar a fila de atualizações.') } finally { setLoading(false) }
+  }
+  useEffect(() => { load() }, [])
+
+  const pending = items.filter((item) => item.status === 'REGISTRADA')
+  const done = items.filter((item) => item.status !== 'REGISTRADA')
+  const columns = '1.5fr .65fr .8fr 1fr .85fr 130px'
+
+  return <>
+    <PageHeader eyebrow="FILA DE ATUALIZAÇÃO DE DADOS" title="Atualizações de cadastro dos clientes" subtitle="Correções de contato e endereço aguardando alteração no sistema Prático. Nenhuma delas interfere em limite de crédito." />
+    <div className="section-title"><div><h2>Aguardando conferência</h2><p>{pending.length} atualização(ões) na fila</p></div></div>
+    {loading ? <p className="subheading">Carregando...</p> : pending.length ? <section className="admin-card"><div className="user-table"><div className="user-head" style={{ gridTemplateColumns: columns }}><span>CLIENTE</span><span>REGISTRO</span><span>VENDEDOR</span><span>CAMPOS</span><span>ENVIADA EM</span><span></span></div>
+      {pending.map((item) => <div className="user-row" key={item.id} style={{ gridTemplateColumns: columns }}><div><strong>{item.companyName}</strong><small>Código Prático: {item.clientCode}</small></div><span className="user-role">{item.reference}</span><span className="user-role">{item.sellerName}</span><span className="user-role" style={{ color: '#c0392b', fontWeight: 700 }}>{dataUpdateChangeCount(dataUpdateFieldsOf(item, null))} campo(s) informado(s)</span><span className="time">{formatDateTime(item.registeredAt)}</span><button className="primary-btn" style={{ padding: '8px 12px', fontSize: 12, boxShadow: 'none' }} onClick={() => setReview(item)}><Check size={14} /> Conferir</button></div>)}
+    </div></section> : <div style={{ padding: '40px 30px', textAlign: 'center', background: '#fff', border: '1px solid var(--line)', borderRadius: 8 }}><Check size={30} style={{ color: '#9adcb8', marginBottom: 10 }} /><p className="subheading">Nenhuma atualização pendente. Tudo em dia!</p></div>}
+    <div className="section-title" style={{ marginTop: 28 }}><div><h2>Histórico</h2><p>{done.length} atualização(ões) já conferida(s)</p></div></div>
+    {done.length ? <section className="admin-card"><div className="user-table"><div className="user-head" style={{ gridTemplateColumns: columns }}><span>CLIENTE</span><span>REGISTRO</span><span>VENDEDOR</span><span>SITUAÇÃO</span><span>CONFERIDA EM</span><span></span></div>
+      {done.map((item) => <div className="user-row" key={item.id} style={{ gridTemplateColumns: columns }}><div><strong>{item.companyName}</strong><small>Código Prático: {item.clientCode}</small></div><span className="user-role">{item.reference}</span><span className="user-role">{item.sellerName}</span><span className={item.status === 'CONFIRMADA' ? 'access-active' : 'access-inactive'}><i></i>{dataUpdateStatusLabel[item.status]}</span><span className="time">{item.reviewedAt ? formatDateTime(item.reviewedAt) : '—'}</span><button className="small-action" onClick={() => setReview(item)}>Ver</button></div>)}
+    </div></section> : <p className="subheading">Nenhuma atualização conferida ainda.</p>}
+    {review && <ClientDataUpdateListModal item={review} onClose={() => setReview(null)} onReviewed={() => { load(); onReload() }} />}
+  </>
+}
 
 function SellerRequestDetailModal({ request, maintenance, onClose, onEdit }: { request: Request; maintenance: boolean; onClose: () => void; onEdit: (item: Request) => void }) {
   const [decisionDetail, setDecisionDetail] = useState<DecisionDetail | null>(null)

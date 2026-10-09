@@ -36,6 +36,25 @@ Quando a gestão aprova ou nega um crédito, a solicitação aparece em **Decis�
 
 ![Histórico: decisões já confirmadas, com quem confirmou e quando](./images/analista/04-historico.jpg)
 
+## 4. Conferindo atualizações de dados dos clientes
+
+Vendedores podem corrigir e-mail, telefone, contato e endereço de um cliente sem abrir
+solicitação de crédito. Esses registros chegam em **Atualizações de dados**, no seu menu.
+
+Para cada item da fila:
+
+1. Clique em **Conferir**. A tela mostra, campo a campo, **o que o vendedor pediu** e, em cinza,
+   **o que está no Prático agora** (leitura direta do cadastro).
+2. Faça a alteração **no sistema Prático**.
+3. Volte e clique em **Confirmar no Prático** — o vendedor recebe um e-mail e o item vai para o
+   histórico.
+
+Se a informação estiver errada ou incompleta, clique em **Descartar** e escreva o motivo: ele vai
+por e-mail ao vendedor, que pode corrigir e reenviar. Registrar as observações da conferência é
+opcional, mas ajuda o vendedor a entender o que foi feito.
+
+> Essa conferência **não** mexe em limite de crédito: os dois fluxos são independentes.
+
 ## Precisa de ajuda?
 
 Dúvidas sobre relatórios, permissões ou acesso: procure a **Gestão** ou um **Administrador**. Eles são responsáveis por criar e gerenciar os acessos de toda a equipe.

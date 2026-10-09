@@ -88,3 +88,23 @@
 .maintenance-card .card-heading{gap:14px}
 .maintenance-card .check-line>svg{color:#96660a;background:#fff3d6}
 @media(max-width:580px){.impersonation-banner{padding:10px 16px;flex-wrap:wrap}.maintenance-card .card-heading{flex-direction:column}}
+
+/* Comparação campo a campo na conferência de atualização de dados.
+   O que difere do que já está no Prático fica em vermelho — é o que a analista
+   precisa alterar de verdade; o que é igual fica cinza, só para conferência. */
+.data-update-diff{display:flex;flex-direction:column;gap:6px}
+.data-update-row{display:grid;grid-template-columns:150px minmax(0,1fr);gap:10px;align-items:center;border:1px solid var(--line);border-radius:10px;padding:9px 11px;background:#fbfcfe}
+.data-update-row.changed{border-color:#f3c6c2;background:#fff4f3}
+.data-update-label{font-size:12px;font-weight:600;color:#5a6b7f}
+.data-update-row.changed .data-update-label{color:#a93226}
+.data-update-values{display:flex;align-items:center;gap:10px;min-width:0}
+.data-update-values.single{display:block}
+.data-update-values>div{min-width:0;flex:1}
+.data-update-values small{display:block;font-size:9.5px;font-weight:700;letter-spacing:.6px;color:#9aa6b4;margin-bottom:2px}
+.data-update-values span{display:block;font-size:12.5px;line-height:1.45;word-break:break-word}
+.data-update-values .old{color:#8c99a8}
+.data-update-values .new{font-weight:700;color:#c0392b}
+.data-update-values .same{font-weight:600;color:#3d5e8c}
+.data-update-arrow{flex-shrink:0;color:#d9776f;font-size:15px;font-weight:700}
+.data-update-subtitle{font-size:10.5px;font-weight:700;letter-spacing:.8px;text-transform:uppercase;color:#8c99a8;margin:12px 0 7px}
+@media(max-width:580px){.data-update-row{grid-template-columns:1fr;gap:5px}.data-update-values{flex-direction:column;align-items:flex-start;gap:4px}.data-update-arrow{transform:rotate(90deg)}}

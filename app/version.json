@@ -1,6 +1,31 @@
 {
-  "version": "1.0.3",
+  "version": "1.1.1",
   "changelog": [
+    {
+      "version": "1.1.1",
+      "date": "2026-10-09",
+      "notes": [
+        "Conferência da atualização de dados: o que difere do cadastro atual aparece em vermelho, com o valor atual e o valor a alterar lado a lado.",
+        "A comparação ignora diferenças de escrita (máscara de telefone e CEP, caixa, siglas de via, número grudado no logradouro).",
+        "No histórico, o registro conferido virou somente leitura, mostrando situação, responsável e data.",
+        "O vendedor passou a ver no detalhe tudo o que pediu, separado por Contato, Telefones, E-mails e Endereço.",
+        "A busca no Prático distribui vários e-mails do mesmo cadastro nos campos de e-mail, sem colar separadores no campo.",
+        "O endereço gravado em linha única no Prático passou a ser separado em logradouro, número, complemento, bairro, cidade, UF e CEP.",
+        "Correção: a tela da analista não abria mais com a mensagem de atualização inválida."
+      ]
+    },
+    {
+      "version": "1.1.0",
+      "date": "2026-10-09",
+      "notes": [
+        "Nova área do vendedor \"Atualização de dados\": corrige e-mail, telefone, contato e endereço do cliente sem abrir solicitação de limite de crédito.",
+        "O registro sai como \"Registrada\" e vai direto para a fila de conferência da analista, que confirma (ou descarta, com motivo) depois de alterar o cadastro no sistema Prático.",
+        "A consulta ao Prático nessa área é somente leitura — a alteração no cadastro continua sendo feita por uma pessoa, dentro do Prático.",
+        "O formulário traz busca do cadastro por código ou CNPJ/CPF e o endereço separado em logradouro, número, complemento, bairro, cidade, UF e CEP.",
+        "A analista vê, campo a campo, o que o vendedor pediu e o que está no Prático no momento da conferência, e o vendedor recebe e-mail tanto na confirmação quanto no descarte.",
+        "A trilha de auditoria passa a registrar as atualizações de dados, agrupadas junto dos clientes nas fichas de crédito."
+      ]
+    },
     {
       "version": "1.0.3",
       "date": "2026-09-29",

@@ -11,5 +11,11 @@
     "declaration": false,
     "sourceMap": true
   },
-  "include": ["server"]
+  "include": [
+    "server"
+  ],
+  "exclude": [
+    "server/test-*.ts",
+    "node_modules"
+  ]
 }

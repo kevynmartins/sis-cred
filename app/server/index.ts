@@ -397,18 +397,25 @@ const ensureRequestAccess = async (connection: Awaited<ReturnType<typeof pool.ge
   return rows[0]?.sellerId === authUser.id
 }
 
+type AuditTarget = { requestId: number } | { dataUpdateId: number }
+
+// Um mesmo evento de auditoria pode ser de uma solicitação de crédito (request_id) ou de uma
+// atualização de dados (data_update_id) — são trilhas separadas, mas a tela de auditoria
+// mostra as duas. Por isso o alvo é parametrizado em vez de fixo.
 const logAuditEvent = (
   connection: Awaited<ReturnType<typeof pool.getConnection>>,
-  requestId: number,
+  target: AuditTarget | null,
   actorId: number | undefined,
   eventType: string,
   eventData: Record<string, unknown> | null = null,
 ) => {
   const impersonatedBy = impersonationContext.getStore()
   const data = impersonatedBy ? { ...eventData, impersonatedBy } : eventData
+  const requestId = target && 'requestId' in target ? target.requestId : null
+  const dataUpdateId = target && 'dataUpdateId' in target ? target.dataUpdateId : null
   return connection.query(
-    'INSERT INTO audit_events (request_id, actor_id, event_type, event_data) VALUES (?, ?, ?, ?)',
-    [requestId, actorId ?? null, eventType, data ? JSON.stringify(data) : null],
+    'INSERT INTO audit_events (request_id, data_update_id, actor_id, event_type, event_data) VALUES (?, ?, ?, ?, ?)',
+    [requestId, dataUpdateId, actorId ?? null, eventType, data ? JSON.stringify(data) : null],
   )
 }
 
@@ -814,14 +821,21 @@ app.get('/api/audit-events', authorize('ADMIN', 'GESTORA'), async (request, resp
     if (typeof eventType === 'string' && eventType) { conditions.push('e.event_type = ?'); params.push(eventType) }
     if (typeof from === 'string' && from) { conditions.push('e.created_at >= ?'); params.push(`${from} 00:00:00`) }
     if (typeof to === 'string' && to) { conditions.push('e.created_at <= ?'); params.push(`${to} 23:59:59`) }
-    if (typeof protocol === 'string' && protocol) { conditions.push('(r.protocol LIKE ? OR r.company_name LIKE ? OR r.client_code LIKE ?)'); params.push(`%${protocol}%`, `%${protocol}%`, `%${protocol}%`) }
+    if (typeof protocol === 'string' && protocol) { conditions.push('(r.protocol LIKE ? OR r.company_name LIKE ? OR r.client_code LIKE ? OR d.reference LIKE ? OR d.company_name LIKE ? OR d.client_code LIKE ?)'); params.push(`%${protocol}%`, `%${protocol}%`, `%${protocol}%`, `%${protocol}%`, `%${protocol}%`, `%${protocol}%`) }
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''
+    // Os eventos de atualização de dados não têm solicitação: o LEFT JOIN mantém esses
+    // registros na trilha, e a busca por protocolo/código também precisa achar por
+    // reference ou company_name do registro de atualização.
     const rows = await connection.query(
-      `SELECT e.id, e.request_id AS requestId, e.event_type AS eventType, e.event_data AS eventData, e.created_at AS createdAt,
-        u.name AS actorName, u.role AS actorRole, r.protocol, r.company_name AS companyName, r.client_code AS clientCode
+      `SELECT e.id, e.request_id AS requestId, e.data_update_id AS dataUpdateId, e.event_type AS eventType,
+        e.event_data AS eventData, e.created_at AS createdAt,
+        u.name AS actorName, u.role AS actorRole,
+        r.protocol, r.company_name AS companyName, r.client_code AS clientCode,
+        d.reference AS dataUpdateReference, d.company_name AS dataUpdateCompanyName, d.client_code AS dataUpdateClientCode
        FROM audit_events e
        INNER JOIN users u ON u.id = e.actor_id
-       INNER JOIN credit_requests r ON r.id = e.request_id
+       LEFT JOIN credit_requests r ON r.id = e.request_id
+       LEFT JOIN client_data_updates d ON d.id = e.data_update_id
        ${where}
        ORDER BY e.created_at DESC, e.id DESC
        LIMIT 1000`,
@@ -1108,7 +1122,7 @@ app.post('/api/credit-requests', authorize('VENDEDOR', 'ADMIN'), async (request,
       [protocol, clientCode, companyName, tradeName || null, cnpj, stateRegistration || null, phone || null, address || null, invoiceEmail || null, financeEmail || null, contactName, contactEmail, requestPurpose, purchaseAuthorization, deliveryType, deliveryLocation, deliveryAddress || null, effectiveSellerId, origin || null, sellerNotes || null],
     )
     const requestId = Number(result.insertId)
-    await logAuditEvent(connection, requestId, effectiveSellerId, 'SOLICITACAO_CRIADA', { protocol, companyName })
+    await logAuditEvent(connection, { requestId }, effectiveSellerId, 'SOLICITACAO_CRIADA', { protocol, companyName })
     await connection.commit()
     broadcast('requests-changed', { requestId, reason: 'created', actorId: effectiveSellerId, sellerId: effectiveSellerId, protocol, companyName, status: 'RECEBIDA' })
     response.status(201).json({ id: requestId, protocol })
@@ -1134,7 +1148,7 @@ app.patch('/api/credit-requests/:id/status', authorize('ANALISTA', 'ADMIN'), asy
     connection = await pool.getConnection()
     await connection.beginTransaction()
     await connection.query('UPDATE credit_requests SET status = ? WHERE id = ?', [status, requestId])
-    await logAuditEvent(connection, requestId, authUser?.id, 'STATUS_ATUALIZADO', { status })
+    await logAuditEvent(connection, { requestId }, authUser?.id, 'STATUS_ATUALIZADO', { status })
     await connection.commit()
     broadcast('requests-changed', { requestId, reason: 'status' })
     response.json({ status })
@@ -1170,7 +1184,7 @@ app.patch('/api/credit-requests/:id/return-to-seller', authorize('ANALISTA', 'AD
     }
     await connection.beginTransaction()
     await connection.query('UPDATE credit_requests SET status = ?, return_reason = ? WHERE id = ?', ['DEVOLVIDA', reason.trim(), requestId])
-    await logAuditEvent(connection, requestId, authUser?.id, 'SOLICITACAO_DEVOLVIDA', { reason: reason.trim() })
+    await logAuditEvent(connection, { requestId }, authUser?.id, 'SOLICITACAO_DEVOLVIDA', { reason: reason.trim() })
     await connection.commit()
     broadcast('requests-changed', { requestId, reason: 'return-to-seller', actorId: authUser?.id, sellerId: requestRow.sellerId, protocol: requestRow.protocol, companyName: requestRow.companyName, status: 'DEVOLVIDA' })
 
@@ -1240,7 +1254,7 @@ app.patch('/api/credit-requests/:id', authorize('VENDEDOR', 'ADMIN'), async (req
        WHERE id = ?`,
       [clientCode, companyName, tradeName || null, cnpj, stateRegistration || null, phone || null, address || null, invoiceEmail || null, financeEmail || null, contactName, contactEmail, requestPurpose, purchaseAuthorization, deliveryType, deliveryLocation, deliveryAddress || null, origin || null, sellerNotes || null, requestId],
     )
-    await logAuditEvent(connection, requestId, authUser?.id, isMaintenanceEdit ? 'CORRECAO_MANUTENCAO' : 'SOLICITACAO_REENVIADA', { protocol: requestRow.protocol })
+    await logAuditEvent(connection, { requestId }, authUser?.id, isMaintenanceEdit ? 'CORRECAO_MANUTENCAO' : 'SOLICITACAO_REENVIADA', { protocol: requestRow.protocol })
     await connection.commit()
     broadcast('requests-changed', { requestId, reason: isMaintenanceEdit ? 'maintenance-edit' : 'resent', actorId: authUser?.id, protocol: requestRow.protocol, companyName, status: nextStatus })
     response.json({ status: nextStatus, maintenance: isMaintenanceEdit })
@@ -1300,7 +1314,7 @@ app.post('/api/credit-requests/:id/documents', authorize('VENDEDOR', 'ANALISTA',
       'INSERT INTO dossier_documents (request_id, document_type, original_name, file_data, file_size, extracted_data, mime_type, uploaded_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
       [requestId, documentType, file.originalname, file.buffer, file.size, extractedData ? JSON.stringify(extractedData) : null, file.mimetype, authUser?.id],
     )
-    await logAuditEvent(connection, requestId, authUser?.id, 'DOCUMENTO_ENVIADO', { documentType, originalName: file.originalname })
+    await logAuditEvent(connection, { requestId }, authUser?.id, 'DOCUMENTO_ENVIADO', { documentType, originalName: file.originalname })
     await connection.commit()
     response.status(201).json({ id: Number(result.insertId), documentType, originalName: file.originalname, fileSize: file.size, extractedData, uploadedAt: new Date().toISOString() })
   } catch (error) {
@@ -1323,7 +1337,7 @@ app.delete('/api/documents/:id', authorize('ANALISTA', 'ADMIN'), async (request,
     const doc = rows[0]
     if (!doc) { response.status(404).json({ message: 'Documento não encontrado.' }); return }
     await connection.query('DELETE FROM dossier_documents WHERE id = ?', [documentId])
-    await logAuditEvent(connection, doc.requestId, authUser?.id, 'DOCUMENTO_REMOVIDO', { documentType: doc.documentType, originalName: doc.originalName })
+    await logAuditEvent(connection, { requestId: doc.requestId }, authUser?.id, 'DOCUMENTO_REMOVIDO', { documentType: doc.documentType, originalName: doc.originalName })
     response.status(204).end()
   } catch (error) {
     console.error(error)
@@ -1412,7 +1426,7 @@ app.patch('/api/credit-requests/:id/decision', authorize('GESTORA', 'ADMIN'), as
       'UPDATE credit_requests SET status = ?, approved_limit = ?, client_message = ? WHERE id = ?',
       [status, decision === 'APROVADA' ? approvedLimit : null, clientMessage || null, requestId],
     )
-    await logAuditEvent(connection, requestId, managerId, 'DECISAO_REGISTRADA', { decision, approvedLimit: approvedLimit || null })
+    await logAuditEvent(connection, { requestId }, managerId, 'DECISAO_REGISTRADA', { decision, approvedLimit: approvedLimit || null })
     await connection.commit()
     broadcast('requests-changed', { requestId, reason: 'decision', actorId: managerId, sellerId: requestRow.sellerId, protocol: requestRow.protocol, companyName: requestRow.companyName, status })
 
@@ -1480,7 +1494,7 @@ app.patch('/api/credit-requests/:id/reopen', authorize('GESTORA', 'ADMIN'), asyn
       'UPDATE credit_requests SET status = ?, approved_limit = ?, client_message = ?, pratico_confirmed_at = NULL, pratico_confirmed_by = NULL WHERE id = ?',
       ['APROVADA', approvedLimit, clientMessage || null, requestId],
     )
-    await logAuditEvent(connection, requestId, managerId, 'DECISAO_REABERTA', { approvedLimit, internalReason })
+    await logAuditEvent(connection, { requestId }, managerId, 'DECISAO_REABERTA', { approvedLimit, internalReason })
     await connection.commit()
     broadcast('requests-changed', { requestId, reason: 'reopen', actorId: managerId, sellerId: requestRow.sellerId, protocol: requestRow.protocol, companyName: requestRow.companyName, status: 'APROVADA' })
 
@@ -1534,7 +1548,7 @@ app.patch('/api/credit-requests/:id/pratico-confirm', authorize('ANALISTA', 'ADM
     if (!['APROVADA', 'NEGADA'].includes(requestRow.status)) { response.status(400).json({ message: 'Esta solicitação ainda não tem uma decisão registrada.' }); return }
     if (requestRow.praticoConfirmedAt) { response.status(409).json({ message: 'Esta atualização já havia sido confirmada.' }); return }
     await connection.query('UPDATE credit_requests SET pratico_confirmed_at = NOW(), pratico_confirmed_by = ? WHERE id = ?', [authUser?.id, requestId])
-    await logAuditEvent(connection, requestId, authUser?.id, 'PRATICO_CONFIRMADO', { status: requestRow.status })
+    await logAuditEvent(connection, { requestId }, authUser?.id, 'PRATICO_CONFIRMADO', { status: requestRow.status })
     broadcast('requests-changed', { requestId, reason: 'pratico-confirm', actorId: authUser?.id, sellerId: requestRow.sellerId, protocol: requestRow.protocol, companyName: requestRow.companyName, status: requestRow.status })
 
     let emailSent = false
@@ -1567,6 +1581,285 @@ app.patch('/api/credit-requests/:id/pratico-confirm', authorize('ANALISTA', 'ADM
   } catch (error) {
     console.error(error)
     response.status(500).json({ message: 'Não foi possível confirmar a atualização no Prático.' })
+  } finally {
+    connection?.release()
+  }
+})
+
+// ---------------------------------------------------------------------------
+// Atualização de dados do cliente (sem solicitação de limite de crédito)
+// ---------------------------------------------------------------------------
+// O vendedor corrige e-mail, telefone, contato e endereço direto do cadastro do
+// cliente, sem abrir uma ficha de crédito. A gravação no Prático NÃO acontece
+// por aqui: este registro é a fila de conferência da analista, que faz a
+// alteração no sistema Prático e confirma (ou descarta) em seguida.
+
+type ClientDataUpdateStatus = 'REGISTRADA' | 'CONFIRMADA' | 'DESCARTADA'
+
+const dataUpdateFields = `d.id, d.reference, d.client_code AS clientCode, d.cnpj, d.company_name AS companyName,
+  d.contact_name AS contactName, d.phone, d.phone_mobile AS phoneMobile, d.email,
+  d.invoice_email AS invoiceEmail, d.finance_email AS financeEmail,
+  d.street, d.street_number AS streetNumber, d.street_complement AS streetComplement,
+  d.district, d.city, d.state, d.zip_code AS zipCode, d.notes,
+  d.status, d.registered_at AS registeredAt, d.reviewed_at AS reviewedAt, d.review_notes AS reviewNotes,
+  d.rejection_reason AS rejectionReason, d.seller_id AS sellerId,
+  s.name AS sellerName, s.email AS sellerEmail, r.name AS reviewerName`
+
+const emptyToNull = (value: unknown, maxLength: number): string | null => {
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  return trimmed ? trimmed.slice(0, maxLength) : null
+}
+
+const validEmail = (value: unknown): value is string =>
+  typeof value === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim())
+
+const formatZip = (raw: string) => {
+  const digits = raw.replace(/\D/g, '').slice(0, 8)
+  return digits.length > 5 ? `${digits.slice(0, 5)}-${digits.slice(5)}` : digits
+}
+
+const normalizeState = (raw: unknown): string | null => {
+  if (typeof raw !== 'string') return null
+  const letters = raw.replace(/[^A-Za-z]/g, '').toUpperCase()
+  return letters.length === 2 ? letters : null
+}
+
+const normalizeDocument = (raw: unknown): string | null => {
+  if (typeof raw !== 'string') return null
+  const digits = raw.replace(/[^A-Z0-9]/gi, '').toUpperCase()
+  return digits || null
+}
+
+// Lista as atualizações de dados. O vendedor vê só as próprias; analista, gestão
+// e admin veem todas (a gestão tem o mesmo papel de conferência que a analista).
+app.get('/api/client-data-updates', async (request, response) => {
+  const authUser = (request as AuthRequest).user
+  const sellerFilter = authUser?.role === 'VENDEDOR' ? authUser.id : null
+  const status = typeof request.query.status === 'string' && request.query.status ? request.query.status : null
+  let connection
+  try {
+    connection = await pool.getConnection()
+    const rows = await connection.query(
+      `SELECT ${dataUpdateFields}
+       FROM client_data_updates d
+       INNER JOIN users s ON s.id = d.seller_id
+       LEFT JOIN users r ON r.id = d.reviewed_by
+       WHERE (? IS NULL OR d.seller_id = ?) AND (? IS NULL OR d.status = ?)
+       ORDER BY d.registered_at DESC`,
+      [sellerFilter, sellerFilter, status, status],
+    )
+    response.json(rows)
+  } catch (error) {
+    console.error(error)
+    response.status(500).json({ message: 'Não foi possível consultar as atualizações de dados.' })
+  } finally {
+    connection?.release()
+  }
+})
+
+app.post('/api/client-data-updates', authorize('VENDEDOR', 'ADMIN'), async (request, response) => {
+  const authUser = (request as AuthRequest).user
+  const body = request.body as Record<string, unknown>
+  const sellerId = authUser!.role === 'VENDEDOR' ? authUser!.id : Number(body.sellerId)
+  const clientCode = emptyToNull(body.clientCode, 40)
+  const companyName = emptyToNull(body.companyName, 180)
+  const email = emptyToNull(body.email, 180)
+  const invoiceEmail = emptyToNull(body.invoiceEmail, 180)
+  const financeEmail = emptyToNull(body.financeEmail, 180)
+
+  if (!sellerId) { response.status(400).json({ message: 'Selecione o vendedor responsável pela atualização.' }); return }
+  if (!clientCode) { response.status(400).json({ message: 'Informe o código do cadastro do cliente no Prático.' }); return }
+  if (!companyName) { response.status(400).json({ message: 'Informe o nome do cliente.' }); return }
+  for (const [value, label] of [[email, 'E-mail'], [invoiceEmail, 'E-mail para NFe'], [financeEmail, 'E-mail financeiro']] as const) {
+    if (value && !validEmail(value)) { response.status(400).json({ message: `${label} inválido: confira o endereço digitado.` }); return }
+  }
+  const state = normalizeState(body.state)
+  if (body.state && !state) { response.status(400).json({ message: 'UF inválida: use duas letras, como SP.' }); return }
+  const city = emptyToNull(body.city, 120)
+  if (state && !city) { response.status(400).json({ message: 'Informe a cidade junto com a UF.' }); return }
+  const rawZip = emptyToNull(body.zipCode, 9)
+  if (rawZip && !/^\d{5}-?\d{3}$/.test(rawZip)) { response.status(400).json({ message: 'CEP inválido: use o formato 00000-000.' }); return }
+  // Normaliza para a máscara antes de gravar, para que a analista sempre veja o CEP do mesmo jeito.
+  const zipCode = rawZip ? formatZip(rawZip) : null
+  // A área existe para corrigir dados de contato: sem nenhum e-mail não há o que
+    // atualizar de verdade, então o registro é recusado antes de chegar à fila.
+    if (!email && !invoiceEmail && !financeEmail) {
+      response.status(400).json({ message: 'Informe ao menos um e-mail para atualizar.' })
+      return
+    }
+
+  let connection
+  try {
+    connection = await pool.getConnection()
+    const [target] = await connection.query(
+      `SELECT d.company_name AS companyName FROM client_data_updates d
+       WHERE d.seller_id = ? AND d.client_code = ? AND d.status = 'REGISTRADA' LIMIT 1`,
+      [sellerId, clientCode],
+    )
+    if (target) {
+      response.status(409).json({ message: `Já existe uma atualização deste cliente aguardando conferência (${target.companyName}). Aguarde a analista antes de enviar outra.` })
+      return
+    }
+    const reference = `AT-${new Date().getFullYear()}-${Date.now().toString().slice(-6)}`
+    await connection.beginTransaction()
+    const result = await connection.query(
+      `INSERT INTO client_data_updates (reference, client_code, cnpj, company_name, seller_id,
+        contact_name, phone, phone_mobile, email, invoice_email, finance_email,
+        street, street_number, street_complement, district, city, state, zip_code, notes)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [reference, clientCode, normalizeDocument(body.cnpj), companyName, sellerId,
+        emptyToNull(body.contactName, 150), emptyToNull(body.phone, 60), emptyToNull(body.phoneMobile, 60),
+        email, invoiceEmail, financeEmail,
+        emptyToNull(body.street, 180), emptyToNull(body.streetNumber, 30), emptyToNull(body.streetComplement, 120),
+        emptyToNull(body.district, 120), city, state, zipCode, emptyToNull(body.notes, 2000)],
+    )
+    const dataUpdateId = Number(result.insertId)
+    const changedFields = [
+      email && 'e-mail', invoiceEmail && 'e-mail para NFe', financeEmail && 'e-mail financeiro',
+      emptyToNull(body.phone, 60) && 'telefone', emptyToNull(body.phoneMobile, 60) && 'celular',
+      emptyToNull(body.contactName, 150) && 'contato', emptyToNull(body.street, 180) && 'endereço',
+    ].filter(Boolean) as string[]
+    await logAuditEvent(connection, { dataUpdateId }, authUser?.id, 'ATUALIZACAO_DADOS_REGISTRADA', {
+      reference, companyName, clientCode, changedFields,
+    })
+    await connection.commit()
+    broadcast('client-data-updated', { dataUpdateId, reference, actorId: sellerId, companyName, status: 'REGISTRADA' })
+    response.status(201).json({ id: dataUpdateId, reference })
+  } catch (error) {
+    await connection?.rollback()
+    console.error(error)
+    response.status(500).json({ message: 'Não foi possível registrar a atualização de dados.' })
+  } finally {
+    connection?.release()
+  }
+})
+
+app.patch('/api/client-data-updates/:id/review', authorize('ANALISTA', 'GESTORA', 'ADMIN'), async (request, response) => {
+  const dataUpdateId = Number(request.params.id)
+  const authUser = (request as AuthRequest).user
+  const { status, reviewNotes, rejectionReason } = request.body as { status?: string; reviewNotes?: string; rejectionReason?: string }
+  if (!dataUpdateId) { response.status(400).json({ message: 'Atualização inválida.' }); return }
+  if (status !== 'CONFIRMADA' && status !== 'DESCARTADA') {
+    response.status(400).json({ message: 'Informe se a atualização foi confirmada no Prático ou descartada.' })
+    return
+  }
+  if (status === 'DESCARTADA' && (!rejectionReason || typeof rejectionReason !== 'string' || !rejectionReason.trim())) {
+    response.status(400).json({ message: 'Informe o motivo do descarte para o vendedor.' })
+    return
+  }
+  let connection
+  try {
+    connection = await pool.getConnection()
+    const [row] = await connection.query(
+      `SELECT d.reference, d.company_name AS companyName, d.client_code AS clientCode, d.status,
+        d.seller_id AS sellerId, u.email AS sellerEmail, u.name AS sellerName
+       FROM client_data_updates d INNER JOIN users u ON u.id = d.seller_id WHERE d.id = ?`,
+      [dataUpdateId],
+    )
+    if (!row) { response.status(404).json({ message: 'Atualização não encontrada.' }); return }
+    if (row.status !== 'REGISTRADA') {
+      response.status(409).json({ message: 'Esta atualização já foi conferida e não pode mudar de situação.' })
+      return
+    }
+    const nextStatus = status as ClientDataUpdateStatus
+    await connection.beginTransaction()
+    await connection.query(
+      `UPDATE client_data_updates SET status = ?, reviewed_at = NOW(), reviewed_by = ?, review_notes = ?, rejection_reason = ? WHERE id = ?`,
+      [nextStatus, authUser?.id, emptyToNull(reviewNotes, 2000), nextStatus === 'DESCARTADA' ? rejectionReason!.trim().slice(0, 255) : null, dataUpdateId],
+    )
+    await logAuditEvent(connection, { dataUpdateId }, authUser?.id,
+      nextStatus === 'CONFIRMADA' ? 'ATUALIZACAO_DADOS_CONFIRMADA' : 'ATUALIZACAO_DADOS_DESCARTADA',
+      { reference: row.reference, companyName: row.companyName, reason: nextStatus === 'DESCARTADA' ? rejectionReason!.trim() : null })
+    await connection.commit()
+    broadcast('client-data-updated', { dataUpdateId, reference: row.reference, sellerId: row.sellerId, companyName: row.companyName, status: nextStatus })
+
+    let emailSent = false
+    let emailError: string | null = null
+    if (mailer) {
+      const confirmed = nextStatus === 'CONFIRMADA'
+      const subject = confirmed ? `Dados do cliente atualizados - ${row.reference}` : `Atualização de dados descartada - ${row.reference}`
+      const intro = confirmed
+        ? `Os dados de contato e endereço do cliente ${row.companyName} (código ${row.clientCode}) já foram atualizados no sistema Prático.`
+        : `A atualização dos dados do cliente ${row.companyName} (código ${row.clientCode}) não foi efetivada.`
+      const text = [
+        'Olá,', '',
+        intro,
+        confirmed ? '' : `\nMotivo: ${rejectionReason!.trim()}`,
+        confirmed && reviewNotes?.trim() ? `\nObservações: ${reviewNotes.trim()}` : '',
+        '',
+        confirmed ? 'Nenhuma decisão de limite de crédito foi alterada por esta atualização.' : '',
+        '', 'Sis-Cred Cadastro e Crédito',
+      ].filter((line) => line !== undefined).join('\n')
+      const html = emailLayout({
+        eyebrow: `Registro ${row.reference}`,
+        title: confirmed ? 'Dados atualizados no Prático' : 'Atualização não efetivada',
+        bodyHtml: `<p style="margin:0 0 14px;font-size:14px;color:#3a4756;line-height:1.6;">Olá,</p>
+          <p style="margin:0 0 16px;font-size:14px;color:#3a4756;line-height:1.6;">${escapeHtml(intro)}</p>
+          ${confirmed
+            ? successCallout('Nenhuma decisão de limite de crédito foi alterada — esta era apenas uma correção de cadastro.')
+            : `<div style="margin:0 0 18px;padding:14px 16px;background:#fff6e5;border-left:4px solid #d98324;border-radius:6px;"><p style="margin:0 0 4px;font-size:11px;font-weight:700;letter-spacing:.5px;color:#8a5300;text-transform:uppercase;">Motivo</p><p style="margin:0;font-size:14px;color:#3a4756;line-height:1.55;">${escapeHtml(rejectionReason!.trim())}</p></div>`}
+          ${confirmed && reviewNotes?.trim() ? `<p style="margin:0 0 16px;font-size:14px;color:#3a4756;line-height:1.6;"><strong>Observações:</strong> ${escapeHtml(reviewNotes.trim())}</p>` : ''}`,
+      })
+      try {
+        await mailer.sendMail({ from: process.env.SMTP_FROM || process.env.SMTP_USER, to: row.sellerEmail, subject, text, html, attachments: emailAttachments })
+        emailSent = true
+      } catch (error) {
+        console.error(error)
+        emailError = 'Não foi possível enviar o e-mail.'
+      }
+    }
+    response.json({ status: nextStatus, emailSent, emailError })
+  } catch (error) {
+    await connection?.rollback()
+    console.error(error)
+    response.status(500).json({ message: 'Não foi possível registrar a conferência da atualização.' })
+  } finally {
+    connection?.release()
+  }
+})
+
+// Confere o cadastro atual do cliente direto no Prático, para a analista conferir
+// campo a campo o que já está lá antes de confirmar a alteração. Somente leitura.
+app.get('/api/client-data-updates/:id/pratico', async (request, response) => {
+  const dataUpdateId = Number(request.params.id)
+  if (!dataUpdateId) { response.status(400).json({ message: 'Atualização inválida.' }); return }
+  if (!praticoApiUrl || !process.env.PRATICO_API_USER) { response.status(503).json({ message: 'Integração com o Prático não configurada no servidor.' }); return }
+  let connection
+  try {
+    connection = await pool.getConnection()
+    const [row] = await connection.query(
+      'SELECT client_code AS clientCode, company_name AS companyName, status, seller_id AS sellerId FROM client_data_updates WHERE id = ?',
+      [dataUpdateId],
+    )
+    if (!row) { response.status(404).json({ message: 'Atualização não encontrada.' }); return }
+    const authUser = (request as AuthRequest).user
+    if (authUser?.role === 'VENDEDOR' && row.sellerId !== authUser.id) {
+      response.status(404).json({ message: 'Atualização não encontrada.' })
+      return
+    }
+    const clients = await searchPraticoClients({ cdCliente: row.clientCode })
+    const client = clients[0]
+    if (!client) { response.status(404).json({ message: `Nenhum cadastro encontrado no Prático com o código ${row.clientCode}.` }); return }
+    connection.release()
+    connection = null
+    response.json({
+      companyCode: client.cd_empresa ?? null,
+      current: {
+        contactName: trimOrNull(client.contato),
+        phones: [trimOrNull(client.fone), trimOrNull(client.celular)].filter((phone): phone is string => !!phone),
+        email: trimOrNull(client.email),
+        street: trimOrNull(client.endereco),
+        district: trimOrNull(client.bairro),
+        city: trimOrNull(client.cidade?.nm_cidade),
+        state: (trimOrNull(client.uf) || trimOrNull(client.cidade?.uf) || '').toUpperCase().slice(0, 2) || null,
+        zipCode: trimOrNull(client.cep),
+      },
+    })
+  } catch (error) {
+    console.error('[Prático]', error)
+    const detail = error instanceof Error ? (error.cause instanceof Error ? `${error.message} (${error.cause.message})` : error.message) : String(error)
+    response.status(502).json({ message: `Não foi possível consultar o Prático: ${detail}` })
   } finally {
     connection?.release()
   }

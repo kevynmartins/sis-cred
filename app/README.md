@@ -66,6 +66,12 @@ Se o banco já existia antes da confirmação no Prático ser adicionada, apliqu
 Get-Content .\database\migrations\015_add_pratico_confirmation.sql -Raw | mariadb -u root -p
 ```
 
+Se o banco já existia antes da área de atualização de dados do vendedor, aplique a migration:
+
+```powershell
+Get-Content .\database\migrations\020_add_client_data_updates.sql -Raw | mariadb -u root -p
+```
+
 ## Executar
 
 Em terminais separados, dentro de `app`:
@@ -82,6 +88,25 @@ A interface fica em `http://localhost:5173` e a API em `http://localhost:3001`. 
 - `GET /api/credit-requests`: lista solicitações, com filtro opcional `?status=EM_ANALISE`.
 - `POST /api/credit-requests`: cria uma solicitação do vendedor.
 - `PATCH /api/credit-requests/:id/decision`: registra a decisão da gestão em transação, com auditoria.
+
+## Atualização de dados do cliente
+
+Área separada da fila de crédito: o vendedor corrige e-mail, telefone, contato e endereço
+sem abrir solicitação de limite. O registro fica como `REGISTRADA` até a analista alterar o
+cadastro no Prático e confirmar (ou descartar, com motivo). **A integração com o Prático aqui
+é somente leitura** — a gravação no cadastro do ERP continua sendo feita por uma pessoa.
+
+- `GET /api/client-data-updates`: lista as atualizações (o vendedor vê apenas as suas).
+- `POST /api/client-data-updates`: registra uma nova atualização (`VENDEDOR`).
+- `GET /api/client-data-updates/:id/pratico`: devolve os dados atuais no Prático, para conferência.
+- `PATCH /api/client-data-updates/:id/review`: confirma ou descarta (`ANALISTA`, `GESTORA`, `ADMIN`).
+
+Teste de ponta a ponta (a API precisa estar rodando em outra porta):
+
+```bash
+PORT=3399 npm run api
+TEST_PORT=3399 npx tsx server/test-data-updates.ts
+```
 
 ## Validação
 

@@ -74,6 +74,30 @@ Clique em **Minhas solicitações** para ver todos os clientes que você cadastr
 
 Depois de **Aprovada** ou **Negada**, a analista ainda precisa confirmar a atualização no sistema Prático — quando isso acontece, você recebe um e-mail avisando que o processo foi concluído.
 
-## 5. Dúvidas e suporte
+## 5. Atualizando dados do cliente (sem nova solicitação)
+
+Quando o cliente muda um e-mail, telefone, contato ou endereço, **você não precisa abrir uma nova
+ficha de crédito**. Use a aba **Atualização de dados** no menu lateral.
+
+1. Clique em **Atualização de dados**.
+2. Busque o cliente no Prático pelo **código do cadastro** ou pelo **CNPJ/CPF** e clique em
+   *Buscar no Prático e preencher* — o sistema mostra os dados que já estão lá.
+3. Corrija só o que estiver errado. O endereço é separado em logradouro, número, complemento,
+   bairro, cidade, UF e CEP.
+4. Escreva nas observações por que a mudança é necessária (ajuda a analista a conferir mais rápido).
+5. Clique em **Registrar atualização**.
+
+O registro entra na fila da analista com a situação **Registrada**. Ela faz a alteração no
+sistema Prático e confirma — ou descarta, informing o motivo. Você acompanha o resultado em
+**Minhas atualizações** e recebe um e-mail nos dois casos.
+
+> **Importante:** nenhuma decisão de limite de crédito é alterada por esse caminho. É só a
+> correção dos dados de contato do cliente no cadastro.
+
+**Ao enviar**, o sistema recusa se faltar o código do cliente, o nome, ou **pelo menos um
+e-mail**. Se já houver uma atualização do mesmo cliente aguardando conferência, você recebe um
+aviso para não enviar duas.
+
+## 6. Dúvidas e suporte
 
 Para problemas de acesso (senha, usuário suspenso, função incorreta) ou dúvidas sobre o sistema, procure um usuário de **Gestão** ou **Administrador**, responsáveis por criar e gerenciar os acessos.

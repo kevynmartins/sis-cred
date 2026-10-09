@@ -86,9 +86,21 @@ Lista de todos os clientes que o vendedor cadastrou, com status atual (Recebida,
 
 O vendedor **não** vê a justificativa interna da decisão nem os documentos de crédito (Serasa/DEPS) — apenas o resultado final e a mensagem destinada a ele.
 
+### 4.3 Atualização de dados (sem solicitação de crédito)
+
+Área para corrigir e-mail, telefone, nome do contato e endereço do cliente **sem abrir ficha de crédito**. O endereço é separado em logradouro, número, complemento, bairro, cidade, UF e CEP.
+
+- **Nova atualização**: busca do cadastro no Prático por código do cliente ou CNPJ/CPF (somente leitura), correção dos campos e observações explicando a mudança.
+- Ao registrar, o item entra na fila da analista com a situação **Registrada**. Ela altera o cadastro no Prático e então **confirma** (o vendedor recebe e-mail) ou **descarta**, informando o motivo.
+- **Minhas atualizações**: lista o que está aguardando conferência e o que já foi conferido, com data e responsável.
+
+Regras de validação: são obrigatórios o código do cliente, o nome e **pelo menos um e-mail**; e-mail, UF e CEP precisam estar em formato válido. Não é permitido enviar uma segunda atualização do mesmo cliente enquanto a anterior estiver pendente.
+
+> Esse caminho **não altera nenhuma decisão de limite de crédito** — é somente a correção dos dados de contato no cadastro do cliente.
+
 ## 5. Analista
 
-Menu lateral: **Triagem e dossiê** e **Decisões** (com contador de pendências).
+Menu lateral: **Triagem e dossiê**, **Decisões** (com contador de pendências) e **Atualizações de dados** (com contador).
 
 ### 5.1 Triagem e dossiê
 
@@ -113,6 +125,15 @@ Duas listas:
 - **Histórico**: decisões já confirmadas no Prático, com quem confirmou e quando.
 
 ![Tela Decisões da gestão, com listas de pendentes de confirmação e histórico](./screenshots/18-analista-decisoes-pendentes.jpg)
+
+### 5.3 Atualizações de dados
+
+Fila com as correções de contato e endereço enviadas pelos vendedores, que **não** passam por análise de crédito.
+
+- **Aguardando conferência**: cada item mostra cliente, registro (referença `AT-AAAA-NNNNNN`), vendedor, campos alterados e data de envio.
+- Ao clicar em **Conferir**, a tela mostra campo a campo **o que o vendedor pediu** e, em cinza, **o que está no Prático no momento** (consulta somente leitura ao cadastro).
+- Depois de fazer a alteração **no sistema Prático**, clique em **Confirmar no Prático**. É possível registrar observações (opcional) ou **descartar** com motivo — o vendedor é avisado por e-mail nos dois casos.
+- **Histórico**: atualizações já conferidas, com situação, data e quem conferiu.
 
 ![Aviso de que a atualização foi confirmada no Prático e o vendedor foi avisado por e-mail](./screenshots/19-analista-decisao-confirmada.jpg)
 
