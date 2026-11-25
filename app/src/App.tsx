@@ -1191,6 +1191,10 @@ function AuditView({ requests }: { requests: Request[] }) {
   const [dateTo, setDateTo] = useState('')
   const [searchTerm, setSearchTerm] = useState('')
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(5)
+  const [auditPage, setAuditPage] = useState(1)
+  const [auditPageSize, setAuditPageSize] = useState(5)
 
   const openDetail = async (item: Request) => {
     setDetail(item); setDetailLoading(true); setDetailDecision(null); setDetailDocuments([])
@@ -1217,6 +1221,9 @@ function AuditView({ requests }: { requests: Request[] }) {
     } finally { setEventsLoading(false) }
   }
   useEffect(() => { loadEvents() }, [])
+  useEffect(() => { setPage(1) }, [statusFilter])
+  useEffect(() => { setPage(1) }, [pageSize])
+  useEffect(() => { setAuditPage(1) }, [auditPageSize])
 
   const exportCsv = () => {
     const header = ['Data/Hora', 'Evento', 'Protocolo', 'Código Prático', 'Cliente', 'Responsável', 'Função', 'Detalhes']
@@ -1244,30 +1251,20 @@ function AuditView({ requests }: { requests: Request[] }) {
   const auditGroups = groupAuditEvents(events)
   const allGroupsExpanded = auditGroups.length > 0 && auditGroups.every((group) => expandedGroups.has(group.key))
   const toggleAllGroups = () => setExpandedGroups(allGroupsExpanded ? new Set() : new Set(auditGroups.map((group) => group.key)))
+  const auditTotalPages = Math.max(1, Math.ceil(auditGroups.length / auditPageSize))
+  const auditPaginated = auditGroups.slice((auditPage - 1) * auditPageSize, auditPage * auditPageSize)
 
   const counts: Record<Status, number> = { RECEBIDA: 0, EM_ANALISE: 0, AGUARDANDO_GESTAO: 0, APROVADA: 0, NEGADA: 0, DEVOLVIDA: 0 }
   for (const item of requests) counts[item.status]++
   const filtered = statusFilter === 'ALL' ? requests : requests.filter((item) => item.status === statusFilter)
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize))
+  const paginated = filtered.slice((page - 1) * pageSize, page * pageSize)
 
   return <>
     <PageHeader eyebrow="AUDITORIA" title="Filas de solicitações e documentos" subtitle="Acompanhe todas as solicitações, os documentos enviados e as decisões assinadas com data, hora e responsável." />
     <section className="admin-metrics">
       {statusOrder.map((status) => <button key={status} type="button" onClick={() => setStatusFilter(status)} style={{ all: 'unset', cursor: 'pointer' }}><div style={{ boxShadow: statusFilter === status ? '0 0 0 2px #96660a' : 'none' }} className="metric-card" ><span style={{ display: 'block', color: '#7c8999', fontSize: 11, marginBottom: 6 }}>{statusLabel[status]}</span><strong style={{ font: '800 23px Manrope', display: 'block', color: '#233347' }}>{counts[status]}</strong></div></button>)}
     </section>
-    <div className="section-title"><div><h2>Todas as solicitações</h2><p>{filtered.length} de {requests.length} solicitação(ões){statusFilter !== 'ALL' ? ` · filtrando por ${statusLabel[statusFilter]}` : ''}</p></div>{statusFilter !== 'ALL' && <button className="link-btn" onClick={() => setStatusFilter('ALL')}>Limpar filtro</button>}</div>
-    <div className="admin-card" style={{ padding: 0 }}>
-      <div className="user-table" style={{ padding: '4px 20px 20px' }}>
-        <div className="user-head" style={{ gridTemplateColumns: '1.4fr .7fr 1fr .9fr .8fr 110px' }}><span>CLIENTE</span><span>PROTOCOLO</span><span>VENDEDOR</span><span>STATUS</span><span>ENVIADO EM</span><span></span></div>
-        {filtered.length ? filtered.map((item) => <div className="user-row" key={item.id} style={{ gridTemplateColumns: '1.4fr .7fr 1fr .9fr .8fr 110px' }}>
-          <div><strong>{item.companyName}</strong><small>Código Prático: {item.clientCode}</small></div>
-          <span className="user-role">{item.protocol}</span>
-          <span className="user-role">{item.sellerName}</span>
-          <span className={item.status === 'APROVADA' ? 'access-active' : item.status === 'NEGADA' ? 'access-inactive' : 'user-role'}>{item.status !== 'APROVADA' && item.status !== 'NEGADA' && <i style={{ background: '#96660a', width: 6, height: 6, borderRadius: '50%', display: 'inline-block', marginRight: 5 }}></i>}{item.status === 'APROVADA' || item.status === 'NEGADA' ? <><i></i>{statusLabel[item.status]}</> : statusLabel[item.status]}</span>
-          <span className="time">{new Date(item.submittedAt).toLocaleDateString('pt-BR')}</span>
-          <button className="small-action" onClick={() => openDetail(item)}>Ver dossiê</button>
-        </div>) : <p className="subheading" style={{ padding: '17px' }}>Nenhuma solicitação encontrada.</p>}
-      </div>
-    </div>
 
     <div className="section-title" style={{ marginTop: 28 }}><div><h2>Trilha de auditoria</h2><p>{events.length} evento(s) em {auditGroups.length} cliente(s) — do envio da ficha até a confirmação final no Prático, agrupados por cliente.</p></div><div style={{ display: 'flex', gap: 14 }}><button type="button" className="link-btn" onClick={toggleAllGroups} disabled={!auditGroups.length}>{allGroupsExpanded ? <ChevronUp size={15} /> : <ChevronDown size={15} />} {allGroupsExpanded ? 'Recolher tudo' : 'Expandir tudo'}</button><button type="button" className="link-btn" onClick={exportCsv} disabled={!events.length}><Download size={15} /> Exportar CSV</button></div></div>
     <div className="admin-card">
@@ -1289,8 +1286,8 @@ function AuditView({ requests }: { requests: Request[] }) {
         </label>
         <button type="button" className="primary-btn" style={{ padding: '9px 16px' }} onClick={loadEvents}><Search size={15} /> Filtrar</button>
       </div>
-      {eventsLoading ? <p className="subheading" style={{ padding: '17px' }}>Carregando...</p> : auditGroups.length ? <div className="audit-groups">
-        {auditGroups.map((group) => {
+      {eventsLoading ? <p className="subheading" style={{ padding: '17px' }}>Carregando...</p> : auditGroups.length ? <><div className="audit-groups">
+        {auditPaginated.map((group) => {
           const isOpen = expandedGroups.has(group.key)
           const chronological = [...group.events].reverse()
           return <div className="audit-group" key={group.key}>
@@ -1312,7 +1309,66 @@ function AuditView({ requests }: { requests: Request[] }) {
             </div>}
           </div>
         })}
-      </div> : <p className="subheading" style={{ padding: '17px' }}>Nenhum evento encontrado para os filtros selecionados.</p>}
+      </div>
+      {(auditTotalPages > 1 || auditGroups.length > 5) && <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10, padding: '14px 4px 4px', borderTop: '1px solid #eef1f5', marginTop: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontSize: 12, color: '#617084' }}>Exibir</span>
+          {[5, 10, 20, 30].map((n) => <button key={n} className={auditPageSize === n ? 'primary-btn' : 'small-action'} onClick={() => setAuditPageSize(n)} style={{ minWidth: 36, padding: '5px 10px', fontSize: 13 }}>{n}</button>)}
+          <span style={{ fontSize: 12, color: '#617084' }}>por página</span>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <button className="small-action" disabled={auditPage === 1} onClick={() => setAuditPage(1)} style={{ minWidth: 32 }}>«</button>
+          <button className="small-action" disabled={auditPage === 1} onClick={() => setAuditPage((p) => p - 1)} style={{ minWidth: 32 }}>‹</button>
+          {Array.from({ length: auditTotalPages }, (_, i) => i + 1).filter((p) => p === 1 || p === auditTotalPages || Math.abs(p - auditPage) <= 2).reduce<Array<number | 'ellipsis'>>((acc, p, idx, arr) => {
+            if (idx > 0 && p - (arr[idx - 1] as number) > 1) acc.push('ellipsis')
+            acc.push(p)
+            return acc
+          }, []).map((item, idx) => item === 'ellipsis'
+            ? <span key={`e${idx}`} style={{ padding: '0 4px', color: '#617084' }}>…</span>
+            : <button key={item} className={item === auditPage ? 'primary-btn' : 'small-action'} onClick={() => setAuditPage(item as number)} style={{ minWidth: 32, padding: '5px 10px', fontSize: 13 }}>{item}</button>
+          )}
+          <button className="small-action" disabled={auditPage === auditTotalPages} onClick={() => setAuditPage((p) => p + 1)} style={{ minWidth: 32 }}>›</button>
+          <button className="small-action" disabled={auditPage === auditTotalPages} onClick={() => setAuditPage(auditTotalPages)} style={{ minWidth: 32 }}>»</button>
+          <span style={{ fontSize: 12, color: '#617084' }}>Página {auditPage} de {auditTotalPages} · {auditGroups.length} cliente(s)</span>
+        </div>
+      </div>}</> : <p className="subheading" style={{ padding: '17px' }}>Nenhum evento encontrado para os filtros selecionados.</p>}
+    </div>
+
+    <div className="section-title" style={{ marginTop: 28 }}><div><h2>Todas as solicitações</h2><p>{filtered.length} de {requests.length} solicitação(ões){statusFilter !== 'ALL' ? ` · filtrando por ${statusLabel[statusFilter]}` : ''}</p></div>{statusFilter !== 'ALL' && <button className="link-btn" onClick={() => setStatusFilter('ALL')}>Limpar filtro</button>}</div>
+    <div className="admin-card" style={{ padding: 0 }}>
+      <div className="user-table" style={{ padding: '4px 20px 20px' }}>
+        <div className="user-head" style={{ gridTemplateColumns: '1.4fr .7fr 1fr .9fr .8fr 110px' }}><span>CLIENTE</span><span>PROTOCOLO</span><span>VENDEDOR</span><span>STATUS</span><span>ENVIADO EM</span><span></span></div>
+        {paginated.length ? paginated.map((item) => <div className="user-row" key={item.id} style={{ gridTemplateColumns: '1.4fr .7fr 1fr .9fr .8fr 110px' }}>
+          <div><strong>{item.companyName}</strong><small>Código Prático: {item.clientCode}</small></div>
+          <span className="user-role">{item.protocol}</span>
+          <span className="user-role">{item.sellerName}</span>
+          <span className={item.status === 'APROVADA' ? 'access-active' : item.status === 'NEGADA' ? 'access-inactive' : 'user-role'}>{item.status !== 'APROVADA' && item.status !== 'NEGADA' && <i style={{ background: '#96660a', width: 6, height: 6, borderRadius: '50%', display: 'inline-block', marginRight: 5 }}></i>}{item.status === 'APROVADA' || item.status === 'NEGADA' ? <><i></i>{statusLabel[item.status]}</> : statusLabel[item.status]}</span>
+          <span className="time">{new Date(item.submittedAt).toLocaleDateString('pt-BR')}</span>
+          <button className="small-action" onClick={() => openDetail(item)}>Ver dossiê</button>
+        </div>) : <p className="subheading" style={{ padding: '17px' }}>Nenhuma solicitação encontrada.</p>}
+      </div>
+      {(totalPages > 1 || filtered.length > 5) && <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10, padding: '14px 20px', borderTop: '1px solid #eef1f5' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontSize: 12, color: '#617084' }}>Exibir</span>
+          {[5, 10, 20, 30].map((n) => <button key={n} className={pageSize === n ? 'primary-btn' : 'small-action'} onClick={() => setPageSize(n)} style={{ minWidth: 36, padding: '5px 10px', fontSize: 13 }}>{n}</button>)}
+          <span style={{ fontSize: 12, color: '#617084' }}>por página</span>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <button className="small-action" disabled={page === 1} onClick={() => setPage(1)} style={{ minWidth: 32 }}>«</button>
+          <button className="small-action" disabled={page === 1} onClick={() => setPage((p) => p - 1)} style={{ minWidth: 32 }}>‹</button>
+          {Array.from({ length: totalPages }, (_, i) => i + 1).filter((p) => p === 1 || p === totalPages || Math.abs(p - page) <= 2).reduce<Array<number | 'ellipsis'>>((acc, p, idx, arr) => {
+            if (idx > 0 && p - (arr[idx - 1] as number) > 1) acc.push('ellipsis')
+            acc.push(p)
+            return acc
+          }, []).map((item, idx) => item === 'ellipsis'
+            ? <span key={`e${idx}`} style={{ padding: '0 4px', color: '#617084' }}>…</span>
+            : <button key={item} className={item === page ? 'primary-btn' : 'small-action'} onClick={() => setPage(item as number)} style={{ minWidth: 32, padding: '5px 10px', fontSize: 13 }}>{item}</button>
+          )}
+          <button className="small-action" disabled={page === totalPages} onClick={() => setPage((p) => p + 1)} style={{ minWidth: 32 }}>›</button>
+          <button className="small-action" disabled={page === totalPages} onClick={() => setPage(totalPages)} style={{ minWidth: 32 }}>»</button>
+          <span style={{ fontSize: 12, color: '#617084' }}>Página {page} de {totalPages} · {filtered.length} registro(s)</span>
+        </div>
+      </div>}
     </div>
 
     {detail && <div className="modal-backdrop"><div className="modal" style={{ maxWidth: 560, maxHeight: 'calc(100vh - 40px)', overflowY: 'auto' }}>

@@ -1,6 +1,15 @@
 {
-  "version": "1.1.1",
+  "version": "1.1.2",
   "changelog": [
+    {
+      "version": "1.1.2",
+      "date": "2026-11-25",
+      "notes": [
+        "Página de auditoria reorganizada: trilha de auditoria agora aparece antes da lista de solicitações.",
+        "Paginação na trilha de auditoria e na lista de solicitações: exibe 5 registros por padrão com opção de selecionar 10, 20 ou 30 por página.",
+        "Navegação entre páginas com botões de primeira, anterior, próxima e última página."
+      ]
+    },
     {
       "version": "1.1.1",
       "date": "2026-10-09",
